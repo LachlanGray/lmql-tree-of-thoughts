@@ -1,113 +1,207 @@
 import lmql
+import asyncio
+
+color= {
+    "black": lambda text: f"\033[30m{text}\033[0m",
+    "red": lambda text: f"\033[31m{text}\033[0m",
+    "green": lambda text: f"\033[32m{text}\033[0m",
+    "yellow": lambda text: f"\033[33m{text}\033[0m",
+    "blue": lambda text: f"\033[34m{text}\033[0m",
+    "magenta": lambda text: f"\033[35m{text}\033[0m",
+    "cyan": lambda text: f"\033[36m{text}\033[0m",
+    "white": lambda text: f"\033[37m{text}\033[0m",
+}
 
 
+@lmql.query_class
 class TreeOfThoughts:
     def __init__(self):
         self.tree = {}
+        self.answers = []
 
-    async def reason(self, question):
-        root = question + " Let's think step by step:\n"
+    def reason(self, question, verbose=False):
+        return asyncio.run(self._reason(question, verbose))
+
+    async def _reason(self, question, verbose):
+        root = question + " Let's think one step at a time:"
+        if verbose:
+            print("\033c")
+            print("QUESTION: " + question)
+            print()
+
         self.tree = {root: []}
-        thoughts = await self.get_next_thoughts(root)
-        self.tree[root] = [res.variables["thought"] for res in thoughts]
+        # thoughts = await self.get_next_thoughts(root, 3)
+        # self.tree[root] = [thought.variables["thought"] for thought in thoughts]
 
-        limit = 5
-        current = 0
+        limit = 4
+        current = 1
+        answers = []
+        while current <= limit:
+            new_thoughts = {}
 
-        while current < limit:
-            # TODO: on each iteration append threads to a list of jobs and execute them in parallel
-            for terminal, reasoning in self.traverse():
-                if not await self.is_factual(reasoning):
-                    del self.tree[terminal]
+            if verbose:
+                print(color['blue'](f"ITERATION {current} ---------------------------"))
+            for thought, reasoning in self.dfs(root):
 
-                if await self.can_answer(reasoning):
+                if thought == reasoning:
+                    thoughts = await self.get_next_thoughts(3, reasoning)
+                    new_thoughts[thought] = [thought[0].variables["thought"] for thought in thoughts]
+                    continue
+
+                continued_reasoning = reasoning + "\n -" + thought
+                is_factual = await self.is_factual(continued_reasoning)
+
+                if verbose:
+                    print(reasoning)
+                    print(f" -{color['cyan'](thought)}")
+                    print()
+                    print(color['green']('GOOD REASONING') if is_factual else color['red']('BAD REASONING'))
+                    print()
+
+                if not is_factual:
+                    continue
+
+                reasoning = continued_reasoning
+
+                can_answer = await self.can_answer(reasoning)
+
+                if can_answer:
                     answer = await self.final_answer(reasoning)
-                    final_reasoning = reasoning + "\n" + answer.variables["answer"]
-                    if await self.is_factual(final_reasoning):
-                        return answer
+                    answer = answer[0].variables["answer"]
+                    formatted_answer = "Therefore," + answer + "."
 
-                thoughts = await self.get_next_thoughts(reasoning)
-                self.tree[reasoning] = [res.variables["thought"] for res in thoughts]
+                    if verbose:
+                        print(color['blue']('ATTEMPTING ANSWER: ')  + f"{color['cyan'](formatted_answer)}")
+
+                    final_reasoning = reasoning + "\n\n" + formatted_answer
+                    if await self.is_factual(final_reasoning):
+                        if verbose:
+                            print()
+                            print(color['blue']("COMPLETE REASONING --------------------"))
+                            print(final_reasoning)
+
+                        new_thoughts[thought] = answer
+                        answers.append(answer)
+
+                if verbose:
+                    print(color['blue']('- next thought -------------------'))
+
+                thoughts = await self.get_next_thoughts(3, reasoning)
+                new_thoughts[thought] = [thought[0].variables["thought"] for thought in thoughts]
 
             current += 1
 
+            self.tree.update(new_thoughts)
 
-    def traverse(self, root, path=None):
+            self.answers = answers
+
+            if answers: 
+                if verbose:
+                    print(color['blue']("ANSWERS FOUND ---------------------"))
+                break
+
+        return answers
+
+
+    def dfs(self, node, path=[]):
         '''
         returns all of the paths from the root to the leaves of the tree
-        as a list of (terminal, reasoning)
+        as a list of (thought, reasoning)
         '''
-        if path is None:
-            path = []
+        if node not in self.tree:
+            return (node, "\n -".join(path))
+        else:
+            if not self.tree[node]:
+                return [(node, node)]
 
-        path.append(root)
+            path.append(node)
+            paths = []
+            for child in self.tree[node]:
+                paths.append(self.dfs(child, path[:]))
 
-        # If the current node is a leaf node, return its path
-        if root not in self.tree or not self.tree[root]:
-            return [(root, '\n    - '.join(path))]
-
-        paths = []
-        # If the current node has children, call the method recursively for each child
-        for child in self.tree[root]:
-            paths.extend(self.traverse(child, path.copy()))
-
-        return paths
+            return paths
 
     @lmql.query
     async def final_answer(self, reasoning):
         '''lmql
-        argmax
-            "{reasoning}"
+        sample()
+            "{reasoning}\n\n"
             "Therefore, [answer]"
         from
-            openai/text-ada-001
+            "openai/gpt-3.5-turbo"
         where
-            STOPS_AT(answer, ".")
+            STOPS_BEFORE(answer, ".") and
+            STOPS_BEFORE(answer, "\\n")
         '''
 
+    async def get_next_thoughts(self, n, reasoning):
+        tasks = [self.get_next_thought(reasoning) for _ in range(n)]
+        results = await asyncio.gather(*tasks)
+        return results
+
     @lmql.query
-    async def get_next_thoughts(self, reasoning):
+    async def get_next_thought(self, reasoning):
         '''lmql
-        sample(n=3, temperature=0.8)
+        sample(temperature=0.8)
             "{reasoning}"
-            "    - [thought]"
+            " -[thought]"
         from 
-            openai/text-ada-001
+            "openai/gpt-3.5-turbo"
         where 
-            STOPS_AT(thought, ".")
+            STOPS_BEFORE(thought, "\\n") and 
+            STOPS_BEFORE(thought, ".")
         '''
 
     @lmql.query
     async def can_answer(self, reasoning):
         '''lmql
         argmax
+            "Does an immediate and obvious no-brain conclusion follow from this? yes or no?"
+            "```"
             "{reasoning}"
-            "[continue]"
-            if continue == "Therefore":
+            "```\n\n"
+            "[ready]"
+            if ready in ["yes", "Yes"]:
                 return True
             else:
                 return False
         from 
-            openai/text-ada-001
+            "openai/text-davinci-003"
         where
-            continue in {"Therefore", "    - "}
+            yn in {"yes", "no", "Yes", "No"}
         '''
+
+    # @lmql.query
+    # async def can_answer(self, reasoning):
+    #     '''lmql
+    #     argmax
+    #         "{reasoning}"
+    #         "[proceed]"
+    #         if proceed == "Therefore":
+    #             return True
+    #         else:
+    #             return False
+    #     from 
+    #         "openai/text-davinci-003"
+    #     where
+    #         proceed in {"Therefore", " -"}
+    #     '''
 
     @lmql.query
     async def is_factual(self, reasoning):
         '''lmql
         argmax
-            "Think carefully: is there anything wrong with the following reasoning? yes or no\n\n"
+            "Think carefully: Is something wrong with this passage? yes or no\n\n"
             "```"
             "{reasoning}"
             "```\n"
-            "[YN]"
-            if YN == "yes":
+            "[yn]"
+            if yn in ["yes", "Yes"]:
                 return False
             else:
                 return True
         from 
-            openai/text-ada-001
+            "openai/text-davinci-003"
         where
-            YN in {"yes", "no"}
+            yn in {"yes", "no", "Yes", "No"}
         '''
