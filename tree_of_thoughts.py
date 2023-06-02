@@ -17,109 +17,174 @@ color= {
 class TreeOfThoughts:
     def __init__(self):
         self.tree = {}
+        self.root = ""
         self.answers = []
 
-    def reason(self, question, verbose=False):
-        return asyncio.run(self._reason(question, verbose))
+    def reason(self, question, verbose=False, print_tree=False):
+        return asyncio.run(self._reason(question, verbose, print_tree))
 
-    async def _reason(self, question, verbose):
-        root = question + " Let's think one step at a time:"
+    def print_tree(self, parent=None, level=0, visited=None):
+        if visited is None:
+            visited = set()
+
+        if parent is None:
+            for parent in (k for k in self.tree if not any(k in v for v in self.tree.values())):
+                self.print_tree(parent, level, visited)
+        else:
+            print('  ' * level, parent)
+            visited.add(parent)
+            for child in self.tree.get(parent, []):
+                if child not in visited:
+                    self.print_tree(child, level + 1, visited)
+
+    async def _reason(self, question, verbose, print_tree):
+        strategy = await self.choose_strategy(question)
+        strategy = strategy[0]
+
+        root = question + ". To answer, please " + strategy + "\n\nPlease carry out these steps below *with no explanations*."
         if verbose:
-            print("\033c")
-            print("QUESTION: " + question)
+            print("ROOT --------------------")
+            print(root)
             print()
 
-        self.tree = {root: []}
-        # thoughts = await self.get_next_thoughts(root, 3)
-        # self.tree[root] = [thought.variables["thought"] for thought in thoughts]
 
-        limit = 4
+        self.tree = {root: []}
+        self.root = root
+
+        limit = 3
         current = 1
         answers = []
         while current <= limit:
-            new_thoughts = {}
+            
+            # Determine if any leafs are ready to be answered
+            if verbose:
+                print("CHECKING FOR ANSWERABLE THOUGHTS --------------------")
+            leaf_thoughts = []
+            reasoning_paths = []
+            can_answer = []
+            for leaf_thought, reasoning_path in self.traverse(root):
+                leaf_thoughts.append(leaf_thought)
+                reasoning_paths.append(reasoning_path)
+                can_answer.append(self.can_answer(reasoning_path + "\n - " + leaf_thought))
+            
+            can_answer = await asyncio.gather(*can_answer)
+            can_answer = [x[0] for x in can_answer]
 
             if verbose:
-                print(color['blue'](f"ITERATION {current} ---------------------------"))
-            for thought, reasoning in self.dfs(root):
+                print(f"  {sum(can_answer)} answerable thoughts found")
+                print()
 
-                if thought == reasoning:
-                    thoughts = await self.get_next_thoughts(3, reasoning)
-                    new_thoughts[thought] = [thought[0].variables["thought"] for thought in thoughts]
-                    continue
+            # Generate next thoughts and/or answers
+            if verbose:
+                print("GENERATING NEXT THOUGHTS --------------------")
 
-                continued_reasoning = reasoning + "\n -" + thought
-                is_factual = await self.is_factual(continued_reasoning)
-
-                if verbose:
-                    print(reasoning)
-                    print(f" -{color['cyan'](thought)}")
-                    print()
-                    print(color['green']('GOOD REASONING') if is_factual else color['red']('BAD REASONING'))
-                    print()
-
-                if not is_factual:
-                    continue
-
-                reasoning = continued_reasoning
-
-                can_answer = await self.can_answer(reasoning)
-
+            next_thoughts_list = []
+            answer_leafs = []
+            n_thoughts = 0
+            n_answers = 0
+            for leaf_thought, reasoning_path, can_answer in zip(leaf_thoughts, reasoning_paths, can_answer):
                 if can_answer:
-                    answer = await self.final_answer(reasoning)
-                    answer = answer[0].variables["answer"]
-                    formatted_answer = "Therefore," + answer + "."
+                    next_thoughts_list.append(self.final_answer(reasoning_path + "\n - " + leaf_thought))
+                    answer_leafs.append(leaf_thought)
+                    n_answers += 1
+                else:
+                    next_thoughts_list.append(self.get_next_thoughts(3, reasoning_path + "\n - " + leaf_thought))
+                    n_thoughts += 3
 
-                    if verbose:
-                        print(color['blue']('ATTEMPTING ANSWER: ')  + f"{color['cyan'](formatted_answer)}")
+            next_thoughts_list = await asyncio.gather(*next_thoughts_list)
+            next_thoughts_list = [x if isinstance(x[0], str) else [y[0] for y in x] for x in next_thoughts_list]
 
-                    final_reasoning = reasoning + "\n\n" + formatted_answer
-                    if await self.is_factual(final_reasoning):
-                        if verbose:
-                            print()
-                            print(color['blue']("COMPLETE REASONING --------------------"))
-                            print(final_reasoning)
+            if verbose:
+                print(f"  {n_thoughts} new thoughts, {n_answers} possible answers generated")
+                print()
 
-                        new_thoughts[thought] = answer
-                        answers.append(answer)
+            # Prune leafs with bad reasoning, save good ones to the tree
+            if verbose:
+                print("PRUNING AND CHECKING ANSWERS --------------------")
+            logic_checks_list = []
+            for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
+                logic_checks_list.append(asyncio.gather(*[self.is_factual(reasoning_path + "\n - " + leaf_thought + "\n - " + next_thought) for next_thought in next_thoughts]))
 
-                if verbose:
-                    print(color['blue']('- next thought -------------------'))
+            logic_checks_list = await asyncio.gather(*logic_checks_list)
+            if verbose:
+                n_true = 0
+                n_false = 0
+                for logic_checks in logic_checks_list:
+                    for logic_check in logic_checks:
+                        if logic_check:
+                            n_true += 1
+                        else:
+                            n_false += 1
+                print(f"  {n_true} logic checks passed, {n_false} failed")
 
-                thoughts = await self.get_next_thoughts(3, reasoning)
-                new_thoughts[thought] = [thought[0].variables["thought"] for thought in thoughts]
+            for leaf_thought, next_thoughts, logic_checks in zip(leaf_thoughts, next_thoughts_list, logic_checks_list):
+                if any(logic_checks):
+                    self.tree[leaf_thought] = []
+                else:
+                    continue
+
+                for next_thought, logic_check in zip(next_thoughts, logic_checks):
+                    if logic_check:
+                        self.tree[leaf_thought].append(next_thought)
+
+            # Check if any answer leafs succeeded
+            n_successful_answers = 0
+            for answer_leaf in answer_leafs:
+                if self.tree[answer_leaf]:
+                    answers.append(self.tree[answer_leaf][0])
+                    n_successful_answers += 1
+
+            if verbose:
+                print(f"  {n_successful_answers} successful answers found")
+                print()
 
             current += 1
 
-            self.tree.update(new_thoughts)
+            if answers:
+                if print_tree:
+                    self.print_tree()
+                return answers
 
-            self.answers = answers
+        if verbose:
+            print("NO ANSWERS FOUND --------------------")
+            self.print_tree()
 
-            if answers: 
-                if verbose:
-                    print(color['blue']("ANSWERS FOUND ---------------------"))
-                break
-
-        return answers
-
-
-    def dfs(self, node, path=[]):
+    def traverse(self, node, path=None):
         '''
         returns all of the paths from the root to the leaves of the tree
         as a list of (thought, reasoning)
         '''
+        if not path:
+            path = []
+
         if node not in self.tree:
-            return (node, "\n -".join(path))
+            return [(node, "\n - ".join(path))]
         else:
-            if not self.tree[node]:
+            if node == self.root and not self.tree[node]:
                 return [(node, node)]
 
             path.append(node)
             paths = []
             for child in self.tree[node]:
-                paths.append(self.dfs(child, path[:]))
+                # paths.append(self.traverse(child, path[:]))
+                paths += self.traverse(child, path[:])
 
             return paths
+
+    @lmql.query
+    async def choose_strategy(self, question):
+        '''lmql
+        sample()
+            "In one sentence, the most reliable steps to systematically answer the question \" " 
+            "{question}\" "
+            "step-by-step are to"
+            "[strategy]"
+            return strategy
+        from
+            "openai/gpt-3.5-turbo"
+        where
+            STOPS_AT(strategy, ".")
+        '''
 
     @lmql.query
     async def final_answer(self, reasoning):
@@ -127,28 +192,31 @@ class TreeOfThoughts:
         sample()
             "{reasoning}\n\n"
             "Therefore, [answer]"
+            return answer
         from
             "openai/gpt-3.5-turbo"
         where
-            STOPS_BEFORE(answer, ".") and
-            STOPS_BEFORE(answer, "\\n")
+            STOPS_BEFORE(answer, "\\n") and
+            STOPS_BEFORE(answer, "\n") and 
+            STOPS_BEFORE(answer, ".")
         '''
 
     async def get_next_thoughts(self, n, reasoning):
-        tasks = [self.get_next_thought(reasoning) for _ in range(n)]
-        results = await asyncio.gather(*tasks)
-        return results
+        thoughts = [self.get_next_thought(reasoning) for _ in range(n)]
+        return await asyncio.gather(*thoughts)
 
     @lmql.query
     async def get_next_thought(self, reasoning):
         '''lmql
-        sample(temperature=0.8)
+        sample()
             "{reasoning}"
-            " -[thought]"
+            " - [thought]"
+            return thought
         from 
             "openai/gpt-3.5-turbo"
         where 
             STOPS_BEFORE(thought, "\\n") and 
+            STOPS_BEFORE(thought, "\n") and 
             STOPS_BEFORE(thought, ".")
         '''
 
@@ -156,20 +224,43 @@ class TreeOfThoughts:
     async def can_answer(self, reasoning):
         '''lmql
         argmax
-            "Does an immediate and obvious no-brain conclusion follow from this? yes or no?"
-            "```"
+            "Does an immediate and obvious no-brain conclusion follow from this? yes or no?\n"
+            "```\n"
             "{reasoning}"
             "```\n\n"
-            "[ready]"
-            if ready in ["yes", "Yes"]:
+            "[yn]"
+            if yn.split()[-1] in ["yes", "Yes"]:
                 return True
             else:
                 return False
         from 
-            "openai/text-davinci-003"
+            "openai/gpt-3.5-turbo"
         where
-            yn in {"yes", "no", "Yes", "No"}
+            STOPS_AT(yn, "yes") and
+            STOPS_AT(yn, "no") and
+            STOPS_AT(yn, "Yes") and
+            STOPS_AT(yn, "No") and
+            len(TOKENS(yn)) < 20
         '''
+
+    # @lmql.query
+    # async def can_answer(self, reasoning):
+    #     '''lmql
+    #     argmax
+    #         "Does an immediate and obvious no-brain conclusion follow from this? yes or no?"
+    #         "```"
+    #         "{reasoning}"
+    #         "```\n\n"
+    #         "[ready]"
+    #         if ready in ["yes", "Yes"]:
+    #             return True
+    #         else:
+    #             return False
+    #     from 
+    #         "openai/text-davinci-003"
+    #     where
+    #         ready in {"yes", "no", "Yes", "No"}
+    #     '''
 
     # @lmql.query
     # async def can_answer(self, reasoning):
@@ -184,24 +275,47 @@ class TreeOfThoughts:
     #     from 
     #         "openai/text-davinci-003"
     #     where
-    #         proceed in {"Therefore", " -"}
+    #         proceed in {"Therefore", " - "}
     #     '''
 
     @lmql.query
     async def is_factual(self, reasoning):
         '''lmql
         argmax
-            "Think carefully: Is something wrong with this passage? yes or no\n\n"
+            "Does this line of reasoning hold, AND is it on track to satisfy the meaning of the question? yes or no?\n\n"
             "```"
             "{reasoning}"
             "```\n"
             "[yn]"
-            if yn in ["yes", "Yes"]:
+            if yn.split()[-1] in ["yes", "Yes"]:
                 return False
             else:
                 return True
         from 
-            "openai/text-davinci-003"
+            "openai/gpt-3.5-turbo"
         where
-            yn in {"yes", "no", "Yes", "No"}
+            STOPS_AT(yn, "yes") and
+            STOPS_AT(yn, "no") and
+            STOPS_AT(yn, "Yes") and
+            STOPS_AT(yn, "No") and
+            len(TOKENS(yn)) < 20
         '''
+
+    # @lmql.query
+    # async def is_factual(self, reasoning):
+    #     '''lmql
+    #     argmax
+    #         "Think carefully: Is something wrong with this passage? yes or no?\n\n"
+    #         "```"
+    #         "{reasoning}"
+    #         "```\n"
+    #         "[yn]"
+    #         if yn in ["yes", "Yes"]:
+    #             return False
+    #         else:
+    #             return True
+    #     from 
+    #         "openai/text-davinci-003"
+    #     where
+    #         yn in {"yes", "no", "Yes", "No"}
+    #     '''
