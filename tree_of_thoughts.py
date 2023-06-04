@@ -12,13 +12,51 @@ color= {
     "white": lambda text: f"\033[37m{text}\033[0m",
 }
 
+# TODO: unique identifiers for thoughts
+# TODO: print buffer and esc sequences to hide annoying api errors
+# TODO: debug output writer
 
 @lmql.query_class
 class TreeOfThoughts:
-    def __init__(self):
+    def __init__(self, **kwargs):
+        '''
+        n_active: number of active thoughts to consider at each step
+        n_child_thoughts: number of child thoughts to generate for each active thought
+        max_iterations: maximum number of iterations to run before giving up
+
+        Each iteration creates and evalutates n_active*n_child_thought new thoughts.
+        Abandons if a solution isn't found within max_iterations.
+        '''
+        self.n_active = 3
+        self.n_child_thoughts = 3
+        self.max_iterations = 10
+
+        self.params = {             # TODO: use these in self.process_rating
+            "w_optimality": 1,
+            "b_optimality": 0,
+            "w_relevance": 1,
+            "b_relevance": 0,
+            "w_effectiveness": 1,
+            "b_effectiveness": 0,
+            "w_convergence": 1,
+            "b_convergence": 0,
+            "w_closeness": 1,
+            "b_closeness": 0,
+        }
+
+        self.params.update(kwargs)
+
         self.tree = {}
         self.root = ""
         self.answers = []
+        self.nodes_that_are = {
+            "active": [],
+            "viable": [],
+            "dead": [],
+        }
+
+        self.leaf_scores = {}
+
 
     def reason(self, question, verbose=False, print_tree=False):
         return asyncio.run(self._reason(question, verbose, print_tree))
@@ -38,35 +76,47 @@ class TreeOfThoughts:
                     self.print_tree(child, level + 1, visited)
 
     async def _reason(self, question, verbose, print_tree):
-        strategy = await self.choose_strategy(question)
-        strategy = strategy[0]
-
-        root = question + ". To answer, please " + strategy + "\n\nPlease carry out these steps below *with no explanations*."
+        # TODO: customizable prompt here
+        root = "Question: " + question +". \n\nAnswer: Thinking step by step..."
         if verbose:
             print("ROOT --------------------")
             print(root)
             print()
 
-
         self.tree = {root: []}
         self.root = root
+        self.nodes_that_are["active"] = []
+        self.nodes_that_are["dead"] = []
+        self.leaf_scores = {root: 1}
 
-        limit = 3
         current = 1
         answers = []
-        while current <= limit:
-            
+
+        # TODO: export loop contents to self.step()
+        while current <= self.max_iterations:
+            self.leaf_scores[self.root] = 1 # root can't die
+
             # Determine if any leafs are ready to be answered
             if verbose:
                 print("CHECKING FOR ANSWERABLE THOUGHTS --------------------")
             leaf_thoughts = []
             reasoning_paths = []
             can_answer = []
+
+            self.nodes_that_are["active"] = sorted(self.leaf_scores, key=self.leaf_scores.get, reverse=True)[:self.n_active]
+
             for leaf_thought, reasoning_path in self.traverse(root):
+                if leaf_thought not in self.nodes_that_are["active"]:
+                    continue
+
+                # nodes can be explicitly killed
+                if leaf_thought in self.nodes_that_are["dead"]:
+                    continue
+
                 leaf_thoughts.append(leaf_thought)
                 reasoning_paths.append(reasoning_path)
                 can_answer.append(self.can_answer(reasoning_path + "\n - " + leaf_thought))
-            
+
             can_answer = await asyncio.gather(*can_answer)
             can_answer = [x[0] for x in can_answer]
 
@@ -88,8 +138,8 @@ class TreeOfThoughts:
                     answer_leafs.append(leaf_thought)
                     n_answers += 1
                 else:
-                    next_thoughts_list.append(self.get_next_thoughts(3, reasoning_path + "\n - " + leaf_thought))
-                    n_thoughts += 3
+                    next_thoughts_list.append(self.get_next_thoughts(self.n_child_thoughts, reasoning_path + "\n - " + leaf_thought))
+                    n_thoughts += self.n_child_thoughts
 
             next_thoughts_list = await asyncio.gather(*next_thoughts_list)
             next_thoughts_list = [x if isinstance(x[0], str) else [y[0] for y in x] for x in next_thoughts_list]
@@ -100,37 +150,52 @@ class TreeOfThoughts:
 
             # Prune leafs with bad reasoning, save good ones to the tree
             if verbose:
-                print("PRUNING AND CHECKING ANSWERS --------------------")
-            logic_checks_list = []
-            for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
-                logic_checks_list.append(asyncio.gather(*[self.is_factual(reasoning_path + "\n - " + leaf_thought + "\n - " + next_thought) for next_thought in next_thoughts]))
+                print("ASSESSING THOUGHT PATHS --------------------")
 
-            logic_checks_list = await asyncio.gather(*logic_checks_list)
+            thought_ratings_list = []
+            for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
+                thought_ratings_list.append(asyncio.gather(*[self.assess_thought(reasoning_path + "\n - " + leaf_thought + "\n - " + next_thought) for next_thought in next_thoughts]))
+
+            thought_ratings_list = await asyncio.gather(*thought_ratings_list)
+            thought_ratings_list = [[x[0] for x in y] for y in thought_ratings_list]
+
             if verbose:
                 n_true = 0
                 n_false = 0
-                for logic_checks in logic_checks_list:
-                    for logic_check in logic_checks:
-                        if logic_check:
+                for thought_ratings in thought_ratings_list:
+                    for thought_rating in thought_ratings:
+                        if thought_rating > 0:
                             n_true += 1
                         else:
                             n_false += 1
-                print(f"  {n_true} logic checks passed, {n_false} failed")
+                print(f"  {n_true} viable new thoughts, {n_false} rejected")
 
-            for leaf_thought, next_thoughts, logic_checks in zip(leaf_thoughts, next_thoughts_list, logic_checks_list):
-                if any(logic_checks):
+            for leaf_thought, next_thoughts, thought_ratings in zip(leaf_thoughts, next_thoughts_list, thought_ratings_list):
+                has_viable_thought = False
+                for rating in thought_ratings:
+                    if rating > 0:
+                        has_viable_thought = True
+                        if leaf_thought in self.leaf_scores:
+                            del self.leaf_scores[leaf_thought] # node implicitly dies if eventually none of its descendents are viable
+                        break
+                if has_viable_thought:
                     self.tree[leaf_thought] = []
                 else:
+                    del self.leaf_scores[leaf_thought] # a thought that doesn't yield viable thoughts dies
                     continue
 
-                for next_thought, logic_check in zip(next_thoughts, logic_checks):
-                    if logic_check:
+                for next_thought, thought_rating in zip(next_thoughts, thought_ratings):
+                    if thought_rating > 0: # thought survival threshold
                         self.tree[leaf_thought].append(next_thought)
+                        if next_thought not in self.leaf_scores:
+                            self.leaf_scores[next_thought] = thought_rating
+                    # else:
+                    #     self.nodes_that_are["dead"].append(next_thought)
 
             # Check if any answer leafs succeeded
             n_successful_answers = 0
             for answer_leaf in answer_leafs:
-                if self.tree[answer_leaf]:
+                if self.tree[answer_leaf]: # TODO BUG: sometimes this gives a kw error
                     answers.append(self.tree[answer_leaf][0])
                     n_successful_answers += 1
 
@@ -141,8 +206,10 @@ class TreeOfThoughts:
             current += 1
 
             if answers:
+                # TODO: callback query to filter degenerate answers
                 if print_tree:
                     self.print_tree()
+                # TODO: another query to choose the best answer
                 return answers
 
         if verbose:
@@ -152,7 +219,7 @@ class TreeOfThoughts:
     def traverse(self, node, path=None):
         '''
         returns all of the paths from the root to the leaves of the tree
-        as a list of (thought, reasoning)
+        as a list of (thought, reasoning) tuples
         '''
         if not path:
             path = []
@@ -166,39 +233,25 @@ class TreeOfThoughts:
             path.append(node)
             paths = []
             for child in self.tree[node]:
-                # paths.append(self.traverse(child, path[:]))
                 paths += self.traverse(child, path[:])
 
             return paths
 
-    @lmql.query
-    async def choose_strategy(self, question):
-        '''lmql
-        sample()
-            "In one sentence, the most reliable steps to systematically answer the question \" " 
-            "{question}\" "
-            "step-by-step are to"
-            "[strategy]"
-            return strategy
-        from
-            "openai/gpt-3.5-turbo"
-        where
-            STOPS_AT(strategy, ".")
-        '''
-
+    # TODO: user specified conclusion prompt
     @lmql.query
     async def final_answer(self, reasoning):
         '''lmql
         sample()
             "{reasoning}\n\n"
-            "Therefore, [answer]"
-            return answer
+            "In a sentence the answer is [answer]."
+            if "\n" not in answer:
+                return answer
+            else:
+                return answer.split("\n")[-1]
         from
             "openai/gpt-3.5-turbo"
         where
-            STOPS_BEFORE(answer, "\\n") and
-            STOPS_BEFORE(answer, "\n") and 
-            STOPS_BEFORE(answer, ".")
+            STOPS_AT(answer, ".")
         '''
 
     async def get_next_thoughts(self, n, reasoning):
@@ -206,7 +259,7 @@ class TreeOfThoughts:
         return await asyncio.gather(*thoughts)
 
     @lmql.query
-    async def get_next_thought(self, reasoning):
+    async def get_next_thought(self, reasoning, ):
         '''lmql
         sample()
             "{reasoning}"
@@ -224,7 +277,7 @@ class TreeOfThoughts:
     async def can_answer(self, reasoning):
         '''lmql
         argmax
-            "Does an immediate and obvious no-brain conclusion follow from this? yes or no?\n"
+            "Does the following reasoning contain a correct and satisfying answer to the question asked? yes or no?\n"
             "```\n"
             "{reasoning}"
             "```\n\n"
@@ -242,6 +295,108 @@ class TreeOfThoughts:
             STOPS_AT(yn, "No") and
             len(TOKENS(yn)) < 20
         '''
+
+    def process_rating(self, rating):
+        if rating[-1] in set(range(1, 10)):
+            rating = int(rating[-1])
+        else:
+            rating = 5 # no information
+        return rating
+
+    # TODO: user defined rating criteria for generic use cases
+    # TODO: user defined validations (prompted and programmed)
+    # TODO: penalties/bonuses
+    # TODO: explore metaprompting for rating criteria
+    # TODO: replace ridiculous list of stops_at constraints if "in" constraints are supported for chat
+    @lmql.query
+    async def assess_thought(self, reasoning):
+        '''lmql
+        argmax
+            "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to yes and 5:\n\n"
+            "```"
+            "{reasoning}"
+            "```\n\n"
+            score = 0
+            "The most recent step is logically sound and factual (yes/no): [yn]\n"
+            if yn.split()[-1] in ["no", "No"]:
+                return 0
+
+            "The most recent step is optimal (1 - 9): [rating]\n"
+            rating = self.process_rating(rating)
+            score += rating - 3
+
+            "It is addressing the question (1 - 9): [rating]\n"
+            rating = self.process_rating(rating)
+            score += rating - 3
+
+            "The approach is working as intended (1 - 9): [rating]\n"
+            rating = self.process_rating(rating)
+            score += rating - 3
+
+            "The reasoning is converging to an answer (1 - 9): [rating]\n"
+            rating = self.process_rating(rating)
+            score += rating - 3
+
+            "The reasoning is close to an answer (1 - 9): [rating]\n"
+            rating = self.process_rating(rating)
+            score += rating - 3
+
+            return score
+        from 
+            "openai/gpt-3.5-turbo"
+        where
+            STOPS_AT(yn, "yes") and
+            STOPS_AT(yn, "no") and
+            STOPS_AT(yn, "Yes") and
+            STOPS_AT(yn, "No") and
+            len(TOKENS(yn)) < 10 and
+            STOPS_AT(rating, "1") and
+            STOPS_AT(rating, "2") and
+            STOPS_AT(rating, "3") and
+            STOPS_AT(rating, "4") and
+            STOPS_AT(rating, "5") and
+            STOPS_AT(rating, "6") and
+            STOPS_AT(rating, "7") and
+            STOPS_AT(rating, "8") and
+            STOPS_AT(rating, "9") and
+            len(TOKENS(rating)) < 10
+        '''
+
+    # Keeping discarded queries for reference
+
+    # @lmql.query
+    # async def is_factual(self, reasoning):
+    #     '''lmql
+    #     argmax
+    #         "Think carefully: Is something wrong with this passage? yes or no?\n\n"
+    #         "```"
+    #         "{reasoning}"
+    #         "```\n"
+    #         "[yn]"
+    #         if yn in ["yes", "Yes"]:
+    #             return False
+    #         else:
+    #             return True
+    #     from 
+    #         "openai/text-davinci-003"
+    #     where
+    #         yn in {"yes", "no", "Yes", "No"}
+    #     '''
+
+    # @lmql.query
+    # async def choose_strategy(self, question):
+    #     '''lmql
+    #     sample()
+    #         "In one sentence, the most reliable steps to systematically answer the question \" " 
+    #         "{question}\" "
+    #         "step-by-step are to"
+    #         "[strategy]"
+    #         return strategy
+    #     from
+    #         "openai/gpt-3.5-turbo"
+    #     where
+    #         STOPS_AT(strategy, ".")
+    #     '''
 
     # @lmql.query
     # async def can_answer(self, reasoning):
@@ -278,44 +433,3 @@ class TreeOfThoughts:
     #         proceed in {"Therefore", " - "}
     #     '''
 
-    @lmql.query
-    async def is_factual(self, reasoning):
-        '''lmql
-        argmax
-            "Does this line of reasoning hold, AND is it on track to satisfy the meaning of the question? yes or no?\n\n"
-            "```"
-            "{reasoning}"
-            "```\n"
-            "[yn]"
-            if yn.split()[-1] in ["yes", "Yes"]:
-                return False
-            else:
-                return True
-        from 
-            "openai/gpt-3.5-turbo"
-        where
-            STOPS_AT(yn, "yes") and
-            STOPS_AT(yn, "no") and
-            STOPS_AT(yn, "Yes") and
-            STOPS_AT(yn, "No") and
-            len(TOKENS(yn)) < 20
-        '''
-
-    # @lmql.query
-    # async def is_factual(self, reasoning):
-    #     '''lmql
-    #     argmax
-    #         "Think carefully: Is something wrong with this passage? yes or no?\n\n"
-    #         "```"
-    #         "{reasoning}"
-    #         "```\n"
-    #         "[yn]"
-    #         if yn in ["yes", "Yes"]:
-    #             return False
-    #         else:
-    #             return True
-    #     from 
-    #         "openai/text-davinci-003"
-    #     where
-    #         yn in {"yes", "no", "Yes", "No"}
-    #     '''

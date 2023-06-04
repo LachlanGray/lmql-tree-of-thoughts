@@ -1,6 +1,6 @@
 # Tree of thoughts
-A LMQL implementation of something similar to tree of thoughts.
+A LMQL implementation of something similar to tree of thoughts. Kind of works sometimes. Still very much a work in progress.
 
-Still in progress, kind of works sometimes. Limited to 3 steps of reasoning because I haven't added the ability to backtrack.
+Uses a natural selectionish process to favour fruitful reasoning.
 
-Needs the LMQL commit `4f9a9c0965f924dbab18ca8a4bf6d655c87b97de` to use `self` in the queries.
+Needs the commit `4f9a9c0965f924dbab18ca8a4bf6d655c87b97de` from [this LMQL fork](https://github.com/LachlanGray/lmql.git) for now.
