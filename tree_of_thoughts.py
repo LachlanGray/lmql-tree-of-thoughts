@@ -13,7 +13,6 @@ color= {
 }
 
 # TODO: unique identifiers for thoughts
-# TODO: print buffer and esc sequences to hide annoying api errors
 # TODO: debug output writer
 
 @lmql.query_class
@@ -57,9 +56,16 @@ class TreeOfThoughts:
 
         self.leaf_scores = {}
 
+        self.verbose_buffer = ""
+
 
     def reason(self, question, verbose=False, print_tree=False):
         return asyncio.run(self._reason(question, verbose, print_tree))
+
+    def print_verbose(self):
+        # clear screen
+        print("\033c", end="")
+        print(self.verbose_buffer)
 
     def print_tree(self, parent=None, level=0, visited=None):
         if visited is None:
@@ -77,11 +83,11 @@ class TreeOfThoughts:
 
     async def _reason(self, question, verbose, print_tree):
         # TODO: customizable prompt here
-        root = "Question: " + question +". \n\nAnswer: Thinking step by step..."
+        root = "Please answer the following question: " + question +". \n\nAnswer: Thinking step by step..."
         if verbose:
-            print("ROOT --------------------")
-            print(root)
-            print()
+            self.verbose_buffer += "ROOT --------------------\n"
+            self.verbose_buffer += root + "\n\n"
+            self.print_verbose()
 
         self.tree = {root: []}
         self.root = root
@@ -98,12 +104,14 @@ class TreeOfThoughts:
 
             # Determine if any leafs are ready to be answered
             if verbose:
-                print("CHECKING FOR ANSWERABLE THOUGHTS --------------------")
+                self.verbose_buffer += "CHECKING FOR ANSWERABLE THOUGHTS --------------------\n"
+                self.print_verbose()
             leaf_thoughts = []
             reasoning_paths = []
             can_answer = []
 
             self.nodes_that_are["active"] = sorted(self.leaf_scores, key=self.leaf_scores.get, reverse=True)[:self.n_active]
+            print(self.nodes_that_are["active"])
 
             for leaf_thought, reasoning_path in self.traverse(root):
                 if leaf_thought not in self.nodes_that_are["active"]:
@@ -121,12 +129,13 @@ class TreeOfThoughts:
             can_answer = [x[0] for x in can_answer]
 
             if verbose:
-                print(f"  {sum(can_answer)} answerable thoughts found")
-                print()
+                self.verbose_buffer += f"  {sum(can_answer)} answerable thoughts found\n\n"
+                self.print_verbose()
 
             # Generate next thoughts and/or answers
             if verbose:
-                print("GENERATING NEXT THOUGHTS --------------------")
+                self.verbose_buffer += "GENERATING NEXT THOUGHTS --------------------\n"
+                self.print_verbose()
 
             next_thoughts_list = []
             answer_leafs = []
@@ -145,12 +154,13 @@ class TreeOfThoughts:
             next_thoughts_list = [x if isinstance(x[0], str) else [y[0] for y in x] for x in next_thoughts_list]
 
             if verbose:
-                print(f"  {n_thoughts} new thoughts, {n_answers} possible answers generated")
-                print()
+                self.verbose_buffer += f"  {n_thoughts} new thoughts, {n_answers} possible answers generated\n\n"
+                self.print_verbose()
 
             # Prune leafs with bad reasoning, save good ones to the tree
             if verbose:
-                print("ASSESSING THOUGHT PATHS --------------------")
+                self.verbose_buffer += "ASSESSING THOUGHT PATHS --------------------\n"
+                self.print_verbose()
 
             thought_ratings_list = []
             for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
@@ -168,7 +178,8 @@ class TreeOfThoughts:
                             n_true += 1
                         else:
                             n_false += 1
-                print(f"  {n_true} viable new thoughts, {n_false} rejected")
+                self.verbose_buffer += f"  {n_true} viable new thoughts, {n_false} rejected\n\n"
+                self.print_verbose()
 
             for leaf_thought, next_thoughts, thought_ratings in zip(leaf_thoughts, next_thoughts_list, thought_ratings_list):
                 has_viable_thought = False
@@ -195,13 +206,13 @@ class TreeOfThoughts:
             # Check if any answer leafs succeeded
             n_successful_answers = 0
             for answer_leaf in answer_leafs:
-                if self.tree[answer_leaf]: # TODO BUG: sometimes this gives a kw error
+                if self.tree[answer_leaf]: # TODO BUG: sometimes this gives a kw error I think it's happening when an answer fails a rating test
                     answers.append(self.tree[answer_leaf][0])
                     n_successful_answers += 1
 
             if verbose:
-                print(f"  {n_successful_answers} successful answers found")
-                print()
+                self.verbose_buffer += f"  {n_successful_answers} successful answers found\n\n"
+                self.print_verbose()
 
             current += 1
 
@@ -213,8 +224,10 @@ class TreeOfThoughts:
                 return answers
 
         if verbose:
-            print("NO ANSWERS FOUND --------------------")
-            self.print_tree()
+            self.verbose_buffer += "NO ANSWERS FOUND --------------------\n\n"
+            self.print_verbose()
+            if self.print_tree:
+                self.print_tree()
 
     def traverse(self, node, path=None):
         '''
@@ -262,7 +275,7 @@ class TreeOfThoughts:
     async def get_next_thought(self, reasoning, ):
         '''lmql
         sample()
-            "{reasoning}"
+            "{reasoning}\n"
             " - [thought]"
             return thought
         from 
@@ -277,7 +290,8 @@ class TreeOfThoughts:
     async def can_answer(self, reasoning):
         '''lmql
         argmax
-            "Does the following reasoning contain a correct and satisfying answer to the question asked? yes or no?\n"
+            # "Has the following reasoning achieved a correct and satisfying answer to the initial question? yes or no?\n"
+            "Is the following answer complete? yes or no?\n"
             "```\n"
             "{reasoning}"
             "```\n\n"
