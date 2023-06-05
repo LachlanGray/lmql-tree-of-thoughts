@@ -83,7 +83,7 @@ class TreeOfThoughts:
 
     async def _reason(self, question, verbose, print_tree):
         # TODO: customizable prompt here
-        root = "Please answer the following question: " + question +". \n\nAnswer: Thinking step by step..."
+        root = "Please answer the following question: " + question +". \n\nAnswer:\nLet's think step by step."
         if verbose:
             self.verbose_buffer += "ROOT --------------------\n"
             self.verbose_buffer += root + "\n\n"
@@ -100,7 +100,9 @@ class TreeOfThoughts:
 
         # TODO: export loop contents to self.step()
         while current <= self.max_iterations:
-            self.leaf_scores[self.root] = 1 # root can't die
+            # root can't die
+            if not self.leaf_scores:
+                self.leaf_scores[self.root] = 1
 
             # Determine if any leafs are ready to be answered
             if verbose:
@@ -111,19 +113,19 @@ class TreeOfThoughts:
             can_answer = []
 
             self.nodes_that_are["active"] = sorted(self.leaf_scores, key=self.leaf_scores.get, reverse=True)[:self.n_active]
-            print(self.nodes_that_are["active"])
+            self.verbose_buffer += str(self.nodes_that_are["active"]) + "\n\n"  # remove
 
             for leaf_thought, reasoning_path in self.traverse(root):
                 if leaf_thought not in self.nodes_that_are["active"]:
                     continue
 
-                # nodes can be explicitly killed
+                # nodes can be explicitly disabled
                 if leaf_thought in self.nodes_that_are["dead"]:
                     continue
 
                 leaf_thoughts.append(leaf_thought)
                 reasoning_paths.append(reasoning_path)
-                can_answer.append(self.can_answer(reasoning_path + "\n - " + leaf_thought))
+                can_answer.append(self.can_answer(reasoning_path + "\n" + leaf_thought))
 
             can_answer = await asyncio.gather(*can_answer)
             can_answer = [x[0] for x in can_answer]
@@ -143,11 +145,11 @@ class TreeOfThoughts:
             n_answers = 0
             for leaf_thought, reasoning_path, can_answer in zip(leaf_thoughts, reasoning_paths, can_answer):
                 if can_answer:
-                    next_thoughts_list.append(self.final_answer(reasoning_path + "\n - " + leaf_thought))
+                    next_thoughts_list.append(self.final_answer(reasoning_path + "\n" + leaf_thought))
                     answer_leafs.append(leaf_thought)
                     n_answers += 1
                 else:
-                    next_thoughts_list.append(self.get_next_thoughts(self.n_child_thoughts, reasoning_path + "\n - " + leaf_thought))
+                    next_thoughts_list.append(self.get_next_thoughts(self.n_child_thoughts, reasoning_path + "\n" + leaf_thought))
                     n_thoughts += self.n_child_thoughts
 
             next_thoughts_list = await asyncio.gather(*next_thoughts_list)
@@ -163,8 +165,9 @@ class TreeOfThoughts:
                 self.print_verbose()
 
             thought_ratings_list = []
+            # TODO: zip with can_answer to call the final answer assessment prompt for answer leafs
             for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
-                thought_ratings_list.append(asyncio.gather(*[self.assess_thought(reasoning_path + "\n - " + leaf_thought + "\n - " + next_thought) for next_thought in next_thoughts]))
+                thought_ratings_list.append(asyncio.gather(*[self.assess_thought(reasoning_path + "\n" + leaf_thought + "\n" + next_thought) for next_thought in next_thoughts]))
 
             thought_ratings_list = await asyncio.gather(*thought_ratings_list)
             thought_ratings_list = [[x[0] for x in y] for y in thought_ratings_list]
@@ -192,7 +195,8 @@ class TreeOfThoughts:
                 if has_viable_thought:
                     self.tree[leaf_thought] = []
                 else:
-                    del self.leaf_scores[leaf_thought] # a thought that doesn't yield viable thoughts dies
+                    if leaf_thought in self.leaf_scores:
+                        del self.leaf_scores[leaf_thought] # a thought that doesn't yield viable thoughts dies
                     continue
 
                 for next_thought, thought_rating in zip(next_thoughts, thought_ratings):
@@ -200,13 +204,11 @@ class TreeOfThoughts:
                         self.tree[leaf_thought].append(next_thought)
                         if next_thought not in self.leaf_scores:
                             self.leaf_scores[next_thought] = thought_rating
-                    # else:
-                    #     self.nodes_that_are["dead"].append(next_thought)
 
             # Check if any answer leafs succeeded
             n_successful_answers = 0
             for answer_leaf in answer_leafs:
-                if self.tree[answer_leaf]: # TODO BUG: sometimes this gives a kw error I think it's happening when an answer fails a rating test
+                if answer_leaf in self.tree: # failed answer leafs are deleted by now
                     answers.append(self.tree[answer_leaf][0])
                     n_successful_answers += 1
 
@@ -238,7 +240,7 @@ class TreeOfThoughts:
             path = []
 
         if node not in self.tree:
-            return [(node, "\n - ".join(path))]
+            return [(node, "\n".join(path))]
         else:
             if node == self.root and not self.tree[node]:
                 return [(node, node)]
@@ -276,7 +278,7 @@ class TreeOfThoughts:
         '''lmql
         sample()
             "{reasoning}\n"
-            " - [thought]"
+            "[thought]"
             return thought
         from 
             "openai/gpt-3.5-turbo"
@@ -290,8 +292,8 @@ class TreeOfThoughts:
     async def can_answer(self, reasoning):
         '''lmql
         argmax
-            # "Has the following reasoning achieved a correct and satisfying answer to the initial question? yes or no?\n"
-            "Is the following answer complete? yes or no?\n"
+            "Has the following reasoning achieved a correct and satisfying answer to the initial question? yes or no?\n"
+            # "Is the following answer complete? yes or no?\n"
             "```\n"
             "{reasoning}"
             "```\n\n"
@@ -317,6 +319,22 @@ class TreeOfThoughts:
             rating = 5 # no information
         return rating
 
+    # async def evaluate_reasoning(self, reasoning):
+    #     pass
+
+    # @lmql.query
+    # async def classify(self, question, reasoning):
+    #     pass
+
+    # @lmql.query
+    # async def grade(self, question, reasoning):
+    #     '''lmql
+    #     argmax
+    #         "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to 5:\n\n"
+    #         "```\n"
+    #         "```"
+    #     '''
+
     # TODO: user defined rating criteria for generic use cases
     # TODO: user defined validations (prompted and programmed)
     # TODO: penalties/bonuses
@@ -327,7 +345,7 @@ class TreeOfThoughts:
         '''lmql
         argmax
             "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to yes and 5:\n\n"
-            "```"
+            "```\n"
             "{reasoning}"
             "```\n\n"
             score = 0
