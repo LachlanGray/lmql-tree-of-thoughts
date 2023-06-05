@@ -1,14 +1,31 @@
 from tree_of_thoughts import TreeOfThoughts
 
-solver = TreeOfThoughts()
+
+graded_criteria = [
+    "The most recent step is optimal",
+    "The reasoning is addressing the question",
+    "The chosen approach is working as intended",
+    "The reasoning is converging towards an answer",
+    "The reasoning is close to an answer",
+]
+
+vital_criteria = [
+    "The most recent step is mathematically correct"
+]
+
+fatal_criteria = [
+    "The most recent step makes a mathematical error"
+]
+
+twenty_four_generator = TreeOfThoughts(graded_criteria, vital_criteria, fatal_criteria)
 question = "Use 4 numbers and basic arithmetic operations (+-*/) to obtain 24"
 
-final_answer = solver.reason(question, verbose=True, print_tree=True)
+answers = twenty_four_generator.reason(question, verbose=True, print_tree=True)
 
 print()
 print("FINAL ANSWERS")
-if final_answer:
-    for answer in final_answer:
+if answers:
+    for answer in answers:
         print(answer)
         print()
 else:

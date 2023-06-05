@@ -12,12 +12,13 @@ color= {
     "white": lambda text: f"\033[37m{text}\033[0m",
 }
 
+# TODO: BUG sometimes main loop doesn't make new thoughts and does nothing until termination
 # TODO: unique identifiers for thoughts
 # TODO: debug output writer
 
 @lmql.query_class
 class TreeOfThoughts:
-    def __init__(self, **kwargs):
+    def __init__(self, graded_criteria, vital_criteria, fatal_criteria, **kwargs):
         '''
         n_active: number of active thoughts to consider at each step
         n_child_thoughts: number of child thoughts to generate for each active thought
@@ -30,18 +31,14 @@ class TreeOfThoughts:
         self.n_child_thoughts = 3
         self.max_iterations = 10
 
-        self.params = {             # TODO: use these in self.process_rating
-            "w_optimality": 1,
-            "b_optimality": 0,
-            "w_relevance": 1,
-            "b_relevance": 0,
-            "w_effectiveness": 1,
-            "b_effectiveness": 0,
-            "w_convergence": 1,
-            "b_convergence": 0,
-            "w_closeness": 1,
-            "b_closeness": 0,
-        }
+        self.graded_criteria = graded_criteria # TODO: try using top scorers as references, everything usually gets full marks
+        self.vital_criteria = vital_criteria
+        self.fatal_criteria = fatal_criteria
+
+        self.penalties = [] # TODO: investigate if these are useful, would add into evaluations
+        self.bonuses = []
+
+        self.params = {criteria: (1, 0) for criteria in self.graded_criteria} # TODO: use these in self.process_rating
 
         self.params.update(kwargs)
 
@@ -53,6 +50,8 @@ class TreeOfThoughts:
             "viable": [],
             "dead": [],
         }
+
+        # TODO: memory
 
         self.leaf_scores = {}
 
@@ -82,7 +81,7 @@ class TreeOfThoughts:
                     self.print_tree(child, level + 1, visited)
 
     async def _reason(self, question, verbose, print_tree):
-        # TODO: customizable prompt here
+        # TODO: customizable prompt, move this to init
         root = "Please answer the following question: " + question +". \n\nAnswer:\nLet's think step by step."
         if verbose:
             self.verbose_buffer += "ROOT --------------------\n"
@@ -100,9 +99,15 @@ class TreeOfThoughts:
 
         # TODO: export loop contents to self.step()
         while current <= self.max_iterations:
-            # root can't die
-            if not self.leaf_scores:
-                self.leaf_scores[self.root] = 1
+            if verbose:
+                self.verbose_buffer += f"ITERATION {current} --------------------\n"
+                # self.verbose_buffer += "Leaf scores from previous iterations:\n"
+                # if not self.leaf_scores:
+                #     self.verbose_buffer += "    (No surviving leafs)\n"
+                # for thought, score in self.leaf_scores.items():
+                #     self.verbose_buffer += f"    {score}: {thought}\n"
+                self.verbose_buffer += "\n"
+                self.print_verbose()
 
             # Determine if any leafs are ready to be answered
             if verbose:
@@ -112,8 +117,10 @@ class TreeOfThoughts:
             reasoning_paths = []
             can_answer = []
 
+            # root can't die
+            if not self.leaf_scores:
+                self.leaf_scores = {root: 1}
             self.nodes_that_are["active"] = sorted(self.leaf_scores, key=self.leaf_scores.get, reverse=True)[:self.n_active]
-            self.verbose_buffer += str(self.nodes_that_are["active"]) + "\n\n"  # remove
 
             for leaf_thought, reasoning_path in self.traverse(root):
                 if leaf_thought not in self.nodes_that_are["active"]:
@@ -165,12 +172,11 @@ class TreeOfThoughts:
                 self.print_verbose()
 
             thought_ratings_list = []
-            # TODO: zip with can_answer to call the final answer assessment prompt for answer leafs
+            # TODO: zip with can_answer to call a distinct answer assessment prompt for answer leafs
             for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
-                thought_ratings_list.append(asyncio.gather(*[self.assess_thought(reasoning_path + "\n" + leaf_thought + "\n" + next_thought) for next_thought in next_thoughts]))
+                thought_ratings_list.append(asyncio.gather(*[self.evaluate_reasoning(reasoning_path + "\n" + leaf_thought + "\n" + next_thought) for next_thought in next_thoughts]))
 
             thought_ratings_list = await asyncio.gather(*thought_ratings_list)
-            thought_ratings_list = [[x[0] for x in y] for y in thought_ratings_list]
 
             if verbose:
                 n_true = 0
@@ -206,6 +212,7 @@ class TreeOfThoughts:
                             self.leaf_scores[next_thought] = thought_rating
 
             # Check if any answer leafs succeeded
+            # TODO: (user defined ) callback queries and functions to filter answers
             n_successful_answers = 0
             for answer_leaf in answer_leafs:
                 if answer_leaf in self.tree: # failed answer leafs are deleted by now
@@ -219,10 +226,9 @@ class TreeOfThoughts:
             current += 1
 
             if answers:
-                # TODO: callback query to filter degenerate answers
                 if print_tree:
                     self.print_tree()
-                # TODO: another query to choose the best answer
+                # TODO: if multiple choose highest rating or select with judge query
                 return answers
 
         if verbose:
@@ -312,76 +318,68 @@ class TreeOfThoughts:
             len(TOKENS(yn)) < 20
         '''
 
-    def process_rating(self, rating):
-        if rating[-1] in set(range(1, 10)):
-            rating = int(rating[-1])
-        else:
-            rating = 5 # no information
-        return rating
-
-    # async def evaluate_reasoning(self, reasoning):
-    #     pass
-
-    # @lmql.query
-    # async def classify(self, question, reasoning):
-    #     pass
-
-    # @lmql.query
-    # async def grade(self, question, reasoning):
-    #     '''lmql
-    #     argmax
-    #         "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to 5:\n\n"
-    #         "```\n"
-    #         "```"
-    #     '''
-
     # TODO: user defined rating criteria for generic use cases
     # TODO: user defined validations (prompted and programmed)
     # TODO: penalties/bonuses
     # TODO: explore metaprompting for rating criteria
     # TODO: replace ridiculous list of stops_at constraints if "in" constraints are supported for chat
+    async def evaluate_reasoning(self, reasoning):
+        fatal_flags = [self.bool_classify(statement, reasoning, should_be=False) for statement in self.fatal_criteria]
+        fatal_flags += [self.bool_classify(statement, reasoning, should_be=True) for statement in self.vital_criteria]
+        fatal_flags = await asyncio.gather(*fatal_flags)
+        fatal_flags = [x[0] for x in fatal_flags]
+        if any(fatal_flags):
+            return 0
+
+        evaluations = [self.grade(statement, reasoning) for statement in self.graded_criteria]
+        evaluations = await asyncio.gather(*evaluations)
+        evaluations = [x[0] for x in evaluations]
+
+        return sum(evaluations)
+
     @lmql.query
-    async def assess_thought(self, reasoning):
+    async def bool_classify(self, statement, reasoning, should_be=True):
         '''lmql
         argmax
-            "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to yes and 5:\n\n"
+            # returns 0 if the statement evaluates as it should, otherwise 1
+            default = "yes" if should_be else "no"
+            "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to {default}:\n\n"
             "```\n"
-            "{reasoning}"
+            "{reasoning}\n"
             "```\n\n"
-            score = 0
-            "The most recent step is logically sound and factual (yes/no): [yn]\n"
-            if yn.split()[-1] in ["no", "No"]:
-                return 0
-
-            "The most recent step is optimal (1 - 9): [rating]\n"
-            rating = self.process_rating(rating)
-            score += rating - 3
-
-            "It is addressing the question (1 - 9): [rating]\n"
-            rating = self.process_rating(rating)
-            score += rating - 3
-
-            "The approach is working as intended (1 - 9): [rating]\n"
-            rating = self.process_rating(rating)
-            score += rating - 3
-
-            "The reasoning is converging to an answer (1 - 9): [rating]\n"
-            rating = self.process_rating(rating)
-            score += rating - 3
-
-            "The reasoning is close to an answer (1 - 9): [rating]\n"
-            rating = self.process_rating(rating)
-            score += rating - 3
-
-            return score
-        from 
+            "{statement} (yes/no): [yn]"
+            if yn.split()[-1] in ["yes", "Yes"]:
+                return not should_be
+            else:
+                return should_be
+        from
             "openai/gpt-3.5-turbo"
         where
             STOPS_AT(yn, "yes") and
             STOPS_AT(yn, "no") and
             STOPS_AT(yn, "Yes") and
             STOPS_AT(yn, "No") and
-            len(TOKENS(yn)) < 10 and
+            len(TOKENS(yn)) < 10
+        '''
+
+    @lmql.query
+    async def grade(self, statement, reasoning):
+        '''lmql
+        argmax
+            "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to 5:\n\n"
+            "```\n"
+            "{reasoning}\n"
+            "```\n\n"
+            "{statement} (1 - 9): [rating]"
+            if rating[-1] in set(range(1,10)):
+                rating = int(rating[-1])
+            else:
+                rating = 5 # no information
+
+            return rating
+        from 
+            "openai/gpt-3.5-turbo"
+        where
             STOPS_AT(rating, "1") and
             STOPS_AT(rating, "2") and
             STOPS_AT(rating, "3") and
@@ -393,6 +391,60 @@ class TreeOfThoughts:
             STOPS_AT(rating, "9") and
             len(TOKENS(rating)) < 10
         '''
+
+    # @lmql.query
+    # async def assess_thought(self, reasoning):
+    #     '''lmql
+    #     argmax
+    #         "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to yes and 5:\n\n"
+    #         "```\n"
+    #         "{reasoning}"
+    #         "```\n\n"
+    #         score = 0
+    #         "The most recent step is logically sound and factual (yes/no): [yn]\n"
+    #         if yn.split()[-1] in ["no", "No"]:
+    #             return 0
+
+    #         "The most recent step is optimal (1 - 9): [rating]\n"
+    #         rating = self.process_rating(rating)
+    #         score += rating - 3
+
+    #         "It is addressing the question (1 - 9): [rating]\n"
+    #         rating = self.process_rating(rating)
+    #         score += rating - 3
+
+    #         "The approach is working as intended (1 - 9): [rating]\n"
+    #         rating = self.process_rating(rating)
+    #         score += rating - 3
+
+    #         "The reasoning is converging to an answer (1 - 9): [rating]\n"
+    #         rating = self.process_rating(rating)
+    #         score += rating - 3
+
+    #         "The reasoning is close to an answer (1 - 9): [rating]\n"
+    #         rating = self.process_rating(rating)
+    #         score += rating - 3
+
+    #         return score
+    #     from 
+    #         "openai/gpt-3.5-turbo"
+    #     where
+    #         STOPS_AT(yn, "yes") and
+    #         STOPS_AT(yn, "no") and
+    #         STOPS_AT(yn, "Yes") and
+    #         STOPS_AT(yn, "No") and
+    #         len(TOKENS(yn)) < 10 and
+    #         STOPS_AT(rating, "1") and
+    #         STOPS_AT(rating, "2") and
+    #         STOPS_AT(rating, "3") and
+    #         STOPS_AT(rating, "4") and
+    #         STOPS_AT(rating, "5") and
+    #         STOPS_AT(rating, "6") and
+    #         STOPS_AT(rating, "7") and
+    #         STOPS_AT(rating, "8") and
+    #         STOPS_AT(rating, "9") and
+    #         len(TOKENS(rating)) < 10
+    #     '''
 
     # Keeping discarded queries for reference
 
