@@ -29,10 +29,11 @@ class TreeOfThoughts:
         self.n_active = 3
         self.n_child_thoughts = 3
         self.max_iterations = 10
+        self.decay = 0.99
 
         self.graded_criteria = graded_criteria # TODO: Try using top scorers as references, everything usually gets full marks
-        self.vital_criteria = vital_criteria   #       - A global scaling factor on top of the scores could allow full scores to get reduced
-        self.fatal_criteria = fatal_criteria   #       - a decaying factor each loop on all scores; unexplored leaf thoughts implicitly less important
+        self.vital_criteria = vital_criteria
+        self.fatal_criteria = fatal_criteria
 
         self.penalties = [] # TODO: investigate if these are useful, would add into evaluations
         self.bonuses = []
@@ -92,20 +93,26 @@ class TreeOfThoughts:
         self.root = root
         self.leafs_that_are["active"] = []
         self.leafs_that_are["dead"] = []
-        self.viable_leafs = {root: 1}
+        self.viable_leafs = {root: 1e-3}
 
         current = 1
         answers = []
 
         # TODO: export loop contents to self.step()
         while current <= self.max_iterations:
+            self.viable_leafs = {k: v * self.decay for k, v in self.viable_leafs.items()}
+
+            # root can't die
+            if not self.viable_leafs:
+                self.viable_leafs = {root: 1e-3}
+
             if verbose:
                 self.verbose_buffer += color['green'](f"ITERATION {current}\n")
-                # self.verbose_buffer += "Leaf scores from previous iterations:\n"
-                # if not self.viable_leafs:
-                #     self.verbose_buffer += "    (No surviving leafs)\n"
-                # for thought, score in self.viable_leafs.items():
-                #     self.verbose_buffer += f"    {score}: {thought}\n"
+                if not self.viable_leafs:
+                    self.verbose_buffer += "    (No surviving leafs)\n\n"
+                for thought, score in self.viable_leafs.items():
+                    self.verbose_buffer += f"    {score}: {thought}\n"
+                self.verbose_buffer += "\n"
                 self.print_verbose()
 
             # Determine if any leafs are ready to be answered
@@ -115,10 +122,6 @@ class TreeOfThoughts:
             leaf_thoughts = []
             reasoning_paths = []
             can_answer = []
-
-            # root can't die
-            if not self.viable_leafs:
-                self.viable_leafs = {root: 1}
 
             self.leafs_that_are["active"] = sorted(self.viable_leafs, key=self.viable_leafs.get, reverse=True)[:self.n_active]
 
@@ -151,7 +154,7 @@ class TreeOfThoughts:
             n_answers = 0
             if verbose:
                 # self.verbose_buffer += color['cyan']("\n***\n").join([reasoning_path + "\n" + color['blue'](leaf_thought) + "\n\nReady to answer: " + str(can_answer) + "\n"for leaf_thought, reasoning_path, can_answer in zip(leaf_thoughts, reasoning_paths, can_answer)])
-                self.verbose_buffer += color['cyan']("\n------------------------------").join([reasoning_path + "\n" + color['blue'](leaf_thought) + "\n" for leaf_thought, reasoning_path in zip(leaf_thoughts, reasoning_paths)]) + "\n"
+                self.verbose_buffer += color['cyan']("\n------------------------------\n").join([reasoning_path + "\n" + color['blue'](leaf_thought) + "\n" for leaf_thought, reasoning_path in zip(leaf_thoughts, reasoning_paths)]) + "\n"
                 self.print_verbose()
 
             for leaf_thought, reasoning_path, can_answer in zip(leaf_thoughts, reasoning_paths, can_answer):
