@@ -26,7 +26,7 @@ class TreeOfThoughts:
         Each iteration creates and evalutates n_active*n_child_thought new thoughts.
         Abandons if a solution isn't found within max_iterations.
         '''
-        self.n_active = 3
+        self.n_active = 1
         self.n_child_thoughts = 3
         self.max_iterations = 10
         self.decay = 0.99
@@ -330,7 +330,6 @@ class TreeOfThoughts:
 
     # TODO: user defined rating criteria for generic use cases
     # TODO: user defined validations (prompted and programmed)
-    # TODO: penalties/bonuses
     # TODO: explore metaprompting for rating criteria
     # TODO: replace ridiculous list of stops_at constraints if "in" constraints are supported for chat
     async def evaluate_reasoning(self, reasoning):
@@ -339,11 +338,14 @@ class TreeOfThoughts:
         fatal_flags = await asyncio.gather(*fatal_flags)
         fatal_flags = [x[0] for x in fatal_flags]
         if any(fatal_flags):
+            self.verbose_buffer += "  fatal rejection\n"
             return 0
 
         evaluations = [self.grade(statement, reasoning) for statement in self.graded_criteria]
         evaluations = await asyncio.gather(*evaluations)
         evaluations = [x[0] for x in evaluations]
+        # self.verbose_buffer += "  " + str(evaluations)
+        # self.verbose_buffer += f"  scored {sum(evaluations)}\n"
 
         return sum(evaluations)
 
@@ -376,15 +378,18 @@ class TreeOfThoughts:
     async def grade(self, statement, reasoning):
         '''lmql
         argmax
-            "Please assess the following reasoning, and choose an option for each point. If a question is not applicable, default to 5:\n\n"
+            "Please assess the following reasoning, and choose an option for each point. "
+            "1 means fully disagree, 9 means fully agree, 5 means neutral or no information:\n\n"
             "```\n"
             "{reasoning}\n"
             "```\n\n"
             "{statement} (1 - 9): [rating]"
-            if rating[-1] in set(range(1,10)):
+            if rating[-1] in [str(i) for i in range(1,10)]:
                 rating = int(rating[-1])
+                rating = rating - 5
             else:
-                rating = 5 # no information
+                self.verbose_buffer += "didn't end in number\n"
+                rating = 0 # no information
 
             return rating
         from 

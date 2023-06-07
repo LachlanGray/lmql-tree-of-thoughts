@@ -2,23 +2,23 @@ from tree_of_thoughts import TreeOfThoughts
 
 
 graded_criteria = [
-    "The most recent step is optimal",
-    "The reasoning is addressing the question",
-    "The chosen approach is working as intended",
-    "The reasoning is converging towards an answer",
-    "The reasoning is close to an answer",
+    "The actual meaning of question was perfectly understood",
+    "The reasoning is reliable and repeatable",
+    "It's impossible that there is a mistake",
+    "The reasoning is clear and easy to follow",
 ]
 
 vital_criteria = [
-    "The most recent step is mathematically correct"
+    "There is not a single math mistake in the reasoning",
 ]
 
 fatal_criteria = [
-    "The most recent step makes a mathematical error"
+    "The most recent step contains an error",
 ]
 
 twenty_four_generator = TreeOfThoughts(graded_criteria, vital_criteria, fatal_criteria)
-question = "Use 4 numbers and basic arithmetic operations (+-*/) to obtain 24"
+
+question = "Use 4 numbers and basic arithmetic operations (+-*/) to obtain 24. Go one number at a time."
 
 answers = twenty_four_generator.reason(question, verbose=True, print_tree=True)
 
