@@ -2,8 +2,8 @@ from tree_of_thoughts import TreeOfThoughts
 
 
 graded_criteria = [
-    "The actual meaning of question was perfectly understood",
     "The reasoning is reliable and repeatable",
+    "We are getting closer to the answer"
     "It's impossible that there is a mistake",
     "The reasoning is clear and easy to follow",
 ]
@@ -17,7 +17,7 @@ fatal_criteria = [
 ]
 
 validations = [
-    ("Does the expression utilize 4 numbers?", True),
+    ("Does the expression utilize 4 operands?", True),
     ("Does the expression evaluate to 24?",  True)
 ]
 

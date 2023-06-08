@@ -16,7 +16,6 @@ color= {
 # TODO: unique identifiers for thoughts
 # TODO: debug output writer
 
-@lmql.query_class
 class TreeOfThoughts:
     def __init__(
         self,
@@ -118,7 +117,7 @@ class TreeOfThoughts:
                 self.viable_leafs = {root: 1e-3}
 
             if verbose:
-                self.verbose_buffer += color['green'](f"ITERATION {current}\n")
+                self.verbose_buffer += color['green'](f"ITERATION {current} VIABLE LEAF THOUGHTS\n")
                 if not self.viable_leafs:
                     self.verbose_buffer += "    (No surviving leafs)\n\n"
                 for thought, score in self.viable_leafs.items():
@@ -173,6 +172,7 @@ class TreeOfThoughts:
                     next_thoughts_list.append(self.final_result(reasoning_path + "\n" + leaf_thought))
                     answer_leafs.append(leaf_thought)
                     n_answers += 1
+                    n_thoughts += 1
                 else:
                     next_thoughts_list.append(self.get_next_thoughts(self.n_child_thoughts, reasoning_path + "\n" + leaf_thought))
                     n_thoughts += self.n_child_thoughts
@@ -181,8 +181,8 @@ class TreeOfThoughts:
             next_thoughts_list = [x if isinstance(x[0], str) else [y[0] for y in x] for x in next_thoughts_list]
 
             if verbose:
-                self.verbose_buffer += f"  {n_thoughts} new thoughts\n" 
-                self.verbose_buffer += f"  {n_answers} potential answers\n\n"
+                self.verbose_buffer += f"  {n_thoughts} new thoughts from here\n" 
+                self.verbose_buffer += f"  {n_answers} of which are potential answers\n\n"
                 self.print_verbose()
 
             # Prune leafs with bad reasoning, save good ones to the tree
@@ -202,15 +202,11 @@ class TreeOfThoughts:
 
             if verbose:
                 n_true = 0
-                n_false = 0
                 for thought_ratings in thought_ratings_list:
                     for thought_rating in thought_ratings:
                         if thought_rating > 0:
                             n_true += 1
-                        else:
-                            n_false += 1
-                self.verbose_buffer += f"  {n_true} viable new thoughts\n"
-                self.verbose_buffer += f"  {n_false} rejected\n"
+                self.verbose_buffer += f"  {n_true}/{n_thoughts} of the new thoughts are viable\n"
                 self.print_verbose()
 
             for leaf_thought, next_thoughts, thought_ratings in zip(leaf_thoughts, next_thoughts_list, thought_ratings_list):
@@ -263,11 +259,6 @@ class TreeOfThoughts:
         if node not in self.tree: # move
             return [(node, "\n".join(path))]
         else:
-            # if node == self.root and not self.tree[self.root]:
-            #     return [("", self.root)]
-
-            # if all([x in self.leafs_that_are["dead"] for x in self.tree[node]]):
-            #     return []
             if node in self.leafs_that_are["dead"]:
                 return []
 
