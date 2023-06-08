@@ -16,9 +16,24 @@ fatal_criteria = [
     "The most recent step contains an error",
 ]
 
-twenty_four_generator = TreeOfThoughts(graded_criteria, vital_criteria, fatal_criteria)
+validations = [
+    ("Does the expression utilize 4 numbers?", True),
+    ("Does the expression evaluate to 24?",  True)
+]
 
-question = "Use 4 numbers and basic arithmetic operations (+-*/) to obtain 24. Go one number at a time."
+callback_prompt = "using spaces between numbers and operators and obeying PEDMAS, the final expression is written as: "
+callback_fn = lambda x: x.strip()
+
+twenty_four_generator = TreeOfThoughts(
+    graded_criteria,
+    vital_criteria,
+    fatal_criteria,
+    validations=validations,
+    callback_prompt=callback_prompt,
+    callback_fn=callback_fn,
+)
+
+question = "Use 4 numbers and basic arithmetic operations (+-*/) to obtain 24. Only choose one number each step."
 
 answers = twenty_four_generator.reason(question, verbose=True, print_tree=True)
 

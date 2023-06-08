@@ -1,5 +1,6 @@
 import lmql
 import asyncio
+from typing import List, Tuple, Callable
 
 color= {
     "black": lambda text: f"\033[30m{text}\033[0m",
@@ -17,7 +18,15 @@ color= {
 
 @lmql.query_class
 class TreeOfThoughts:
-    def __init__(self, graded_criteria, vital_criteria, fatal_criteria, **kwargs):
+    def __init__(
+        self,
+        graded_criteria: List[str],
+        vital_criteria: List[str],
+        fatal_criteria: List[str],
+        validations: List[Tuple[str, bool] | Callable]=[],
+        callback_prompt: str="",
+        callback_fn: Callable=None,
+        **kwargs):
         '''
         n_active: number of active thoughts to consider at each step
         n_child_thoughts: number of child thoughts to generate for each active thought
@@ -28,10 +37,14 @@ class TreeOfThoughts:
         '''
         self.n_active = 1
         self.n_child_thoughts = 3
-        self.max_iterations = 10
+        self.max_iterations = 20
         self.decay = 0.99
 
-        self.graded_criteria = graded_criteria # TODO: Try using top scorers as references, everything usually gets full marks
+        self.validations = validations
+        self.callback_prompt = callback_prompt
+        self.callback_fn = callback_fn
+
+        self.graded_criteria = graded_criteria # TODO: Investigate relative scoring scheme
         self.vital_criteria = vital_criteria
         self.fatal_criteria = fatal_criteria
 
@@ -39,8 +52,6 @@ class TreeOfThoughts:
         self.bonuses = []
 
         self.params = {criteria: (1, 0) for criteria in self.graded_criteria} # TODO: use these in self.process_rating
-
-        self.params.update(kwargs)
 
         self.tree = {}
         self.root = ""
@@ -82,7 +93,7 @@ class TreeOfThoughts:
 
     async def _reason(self, question, verbose, print_tree):
         # TODO: definable pre/post script, move this to init
-        root = "Question: " + question +". \nAnswer: Let's think step by step."
+        root = "Question: " + question +"\nAnswer: Let's think step by step."
         self.root = root
         if verbose:
             self.verbose_buffer += color['cyan']( "ROOT ------------------------------------------------------\n")
@@ -159,7 +170,7 @@ class TreeOfThoughts:
 
             for leaf_thought, reasoning_path, can_answer in zip(leaf_thoughts, reasoning_paths, can_answer):
                 if can_answer:
-                    next_thoughts_list.append(self.final_answer(reasoning_path + "\n" + leaf_thought))
+                    next_thoughts_list.append(self.final_result(reasoning_path + "\n" + leaf_thought))
                     answer_leafs.append(leaf_thought)
                     n_answers += 1
                 else:
@@ -180,11 +191,14 @@ class TreeOfThoughts:
                 self.print_verbose()
 
             thought_ratings_list = []
-            # TODO: zip with can_answer to call a distinct answer assessment prompt for answer leafs
             for leaf_thought, reasoning_path, next_thoughts in zip(leaf_thoughts, reasoning_paths, next_thoughts_list):
-                thought_ratings_list.append(asyncio.gather(*[self.evaluate_reasoning(reasoning_path + "\n" + leaf_thought + "\n" + next_thought) for next_thought in next_thoughts]))
+                if leaf_thought not in answer_leafs:
+                    thought_ratings_list.append(asyncio.gather(*[self.evaluate_reasoning(reasoning_path + "\n" + leaf_thought + "\n" + next_thought) for next_thought in next_thoughts]))
+                else:
+                    thought_ratings_list.append(*[self.validate_result(next_thoughts[0])]) # attempted answers only have one branch
 
             thought_ratings_list = await asyncio.gather(*thought_ratings_list)
+            thought_ratings_list = [x if isinstance(x, list) else [x] for x in thought_ratings_list]
 
             if verbose:
                 n_true = 0
@@ -200,30 +214,29 @@ class TreeOfThoughts:
                 self.print_verbose()
 
             for leaf_thought, next_thoughts, thought_ratings in zip(leaf_thoughts, next_thoughts_list, thought_ratings_list):
+                '''
+                Every node in the tree has either been given a viability score, or marked as a deadend.
+                A leaf thought is always initilaized as a list, which points to all of its next_thoughts.
+                Its next thoughts are either added to answer leafs, or its score is saved in viable_leafs, or goes into leafss that are dead.
+                '''
                 if not leaf_thought in self.tree:
                     self.tree[leaf_thought] = []
 
                 for next_thought, thought_rating in zip(next_thoughts, thought_ratings):
                     self.tree[leaf_thought].append(next_thought)
                     if thought_rating > 0: # thought survival threshold
+                        if leaf_thought in answer_leafs: # answer survived validation
+                            answers.append(next_thought)
                         if next_thought not in self.viable_leafs:
-                            self.viable_leafs[next_thought] = thought_rating
+                            self.viable_leafs[next_thought] = thought_rating # leaf survived evaluation
                     else:
                         self.leafs_that_are["dead"].append(next_thought)
+
                     if leaf_thought in self.viable_leafs:
                         del self.viable_leafs[leaf_thought]
 
-
-            # Check if any answer leafs succeeded
-            # TODO: (user defined ) callback queries and functions to filter answers
-            n_successful_answers = 0
-            for answer_leaf in answer_leafs:
-                if answer_leaf in self.tree: # failed answer leafs are deleted by now
-                    answers.append(self.tree[answer_leaf][0])
-                    n_successful_answers += 1
-
             if verbose:
-                self.verbose_buffer += f"  {n_successful_answers} accepted answers\n\n"
+                self.verbose_buffer += f"  {len(answers)} answers passing validation\n\n"
                 self.print_verbose()
 
             current += 1
@@ -231,13 +244,13 @@ class TreeOfThoughts:
             if answers:
                 if print_tree:
                     self.print_tree()
-                # TODO: if multiple choose highest rating or select with judge query
                 return answers
 
         if verbose:
             self.verbose_buffer += color['cyan']( "NO ANSWERS FOUND ------------------------------------------\n\n")
             self.print_verbose()
-            self.print_tree()
+            if print_tree:
+                self.print_tree()
 
     def traverse(self, node, path=None):
         '''
@@ -247,9 +260,7 @@ class TreeOfThoughts:
         if not path:
             path = []
 
-        if node not in self.tree:
-            if node in self.leafs_that_are["dead"]:
-                return []
+        if node not in self.tree: # move
             return [(node, "\n".join(path))]
         else:
             # if node == self.root and not self.tree[self.root]:
@@ -257,6 +268,8 @@ class TreeOfThoughts:
 
             # if all([x in self.leafs_that_are["dead"] for x in self.tree[node]]):
             #     return []
+            if node in self.leafs_that_are["dead"]:
+                return []
 
             path.append(node)
             paths = []
@@ -268,22 +281,59 @@ class TreeOfThoughts:
 
             return paths
 
-    # TODO: user specified conclusion prompt
     @lmql.query
-    async def final_answer(self, reasoning):
+    async def final_result(self, reasoning):
         '''lmql
         sample()
-            "{reasoning}\n\n"
-            "In a sentence the answer is [answer]."
-            if "\n" not in answer:
-                return answer
-            else:
-                return answer.split("\n")[-1]
+            "{reasoning}\n"
+            "{self.callback_prompt}"
+            "[result]"
+            if self.callback_fn:
+                return self.callback_fn(result)
+            return result
+        from
+            "openai/gpt-3.5-turbo"
+        # where
+        #     STOPS_AT(result, ".")
+        '''
+
+    async def validate_result(self, result):
+        if self.validations:
+            validation_failures = []
+            for validation in self.validations:
+                if isinstance(validation, tuple):
+                    validation_failures.append(self.prompt_validate(result, validation[0], validation[1]))
+                else:
+                    validation_failures.append(validation(result))
+
+            validation_failures = await asyncio.gather(*validation_failures)
+            validation_failures = [x[0] if isinstance(x, list) else x for x in validation_failures]
+
+            if any(validation_failures):
+                return 0 # below survival threshold
+
+        return 1 # above survival threshold
+
+    @lmql.query
+    async def prompt_validate(self, result, validation, should_be):
+        """lmql
+        argmax
+            "{result}\n"
+            "{validation} (yes/no)\n"
+            "[yn]"
+            # self.verbose_buffer += f"    {result} {validation}?: {yn} should be {should_be}\n"
+            if yn.split()[-1]  in ["yes", "Yes"]:
+                return not should_be
+            return should_be
         from
             "openai/gpt-3.5-turbo"
         where
-            STOPS_AT(answer, ".")
-        '''
+            STOPS_AT(yn, "yes") and
+            STOPS_AT(yn, "no") and
+            STOPS_AT(yn, "Yes") and
+            STOPS_AT(yn, "No") and
+            len(TOKENS(yn)) < 20
+        """
 
     async def get_next_thoughts(self, n, reasoning):
         thoughts = [self.get_next_thought(reasoning) for _ in range(n)]
@@ -304,6 +354,7 @@ class TreeOfThoughts:
             STOPS_BEFORE(thought, ".")
         '''
 
+    # TODO: use self.stopping_prompt
     @lmql.query
     async def can_answer(self, reasoning):
         '''lmql
@@ -328,17 +379,15 @@ class TreeOfThoughts:
             len(TOKENS(yn)) < 20
         '''
 
-    # TODO: user defined rating criteria for generic use cases
-    # TODO: user defined validations (prompted and programmed)
+    # TODO: programatic constraints
     # TODO: explore metaprompting for rating criteria
-    # TODO: replace ridiculous list of stops_at constraints if "in" constraints are supported for chat
     async def evaluate_reasoning(self, reasoning):
         fatal_flags = [self.bool_classify(statement, reasoning, should_be=False) for statement in self.fatal_criteria]
         fatal_flags += [self.bool_classify(statement, reasoning, should_be=True) for statement in self.vital_criteria]
         fatal_flags = await asyncio.gather(*fatal_flags)
         fatal_flags = [x[0] for x in fatal_flags]
         if any(fatal_flags):
-            self.verbose_buffer += "  fatal rejection\n"
+            # self.verbose_buffer += "  fatal rejection\n"
             return 0
 
         evaluations = [self.grade(statement, reasoning) for statement in self.graded_criteria]
@@ -362,8 +411,7 @@ class TreeOfThoughts:
             "{statement} (yes/no): [yn]"
             if yn.split()[-1] in ["yes", "Yes"]:
                 return not should_be
-            else:
-                return should_be
+            return should_be
         from
             "openai/gpt-3.5-turbo"
         where
@@ -374,6 +422,7 @@ class TreeOfThoughts:
             len(TOKENS(yn)) < 10
         '''
 
+    # TODO: replace ridiculous list of stops_at constraints if "in" constraints are supported for chat
     @lmql.query
     async def grade(self, statement, reasoning):
         '''lmql
