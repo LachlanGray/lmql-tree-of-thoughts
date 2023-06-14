@@ -39,6 +39,76 @@ def create_prompt_answer(data):
     validation = create_prompt_sandwich(data.get("validation", {}))
     return AnswerPrompt(callback_prompt=callback_prompt, callback_fn=callback_fn, validation=validation)
 
+class Node:
+    def __init__(self, id: int, value: int | float, parent_id: int | None):
+        self.id = id
+        self.value = value
+        self.parent_id = parent_id
+
+class Tree:
+    def __init__(self):
+        self.nodes = {}
+        self.viable_leaf_ids = {}
+        self.answers = []
+        self.id_counter = 0
+        self.decay_factor = 0.99
+
+    def add(self, value: str, score: int | float, parent: Node):
+        self.id_counter += 1
+
+        if parent.id not in self.nodes:
+            raise ValueError(f"Parent node {parent.value} ({parent.id}) not in tree")
+
+        self.nodes[self.id_counter] = Node(self.id_counter, value, parent.id)
+
+        if score > 0:
+            self.viable_leaf_ids[self.id_counter] = score
+
+    def add_root(self, value: str) -> Node:
+        self.id_counter += 1
+        root_node = Node(self.id_counter, value, None)
+        self.nodes[self.id_counter] = root_node
+
+        return root_node
+
+    def mark_as_answer(self, id: int, root_id: int):
+        self.answers.append((id, root_id))
+
+    def decay(self):
+        self.viable_leaf_ids = {k: v * self.decay_factor for k, v in self.viable_leaf_ids.items()}
+
+    def leafs_pop_top(self, n: int) -> list[int]:
+        selected_leaf_ids = sorted(self.viable_leaf_ids, key=self.viable_leaf_ids.get, reverse=True)[:n]
+        for leaf_id in selected_leaf_ids:
+            del self.viable_leaf_ids[leaf_id]
+
+        return selected_leaf_ids
+
+    def get_path(self, id: int) -> tuple[Node, str, dict]:
+        if id not in self.nodes:
+            raise ValueError(f"Node {id} not in tree")
+
+        node_values = []
+        leaf_node = self.nodes[id]
+        current_node = self.nodes[id]
+
+        while current_node is not None:
+            node_values.append(current_node.value)
+            if current_node.parent_id is not None:
+                current_node = self.nodes[current_node.parent_id]
+            else:
+                current_node = None
+
+        reasoning_path = node_values[1:]
+        reasoning_path = "\n".join(reversed(reasoning_path))
+
+        return leaf_node, reasoning_path, {}
+
+    def paths_pop_top(self, n) -> list[tuple[Node, str, dict]]:
+        selected_leaf_ids = self.leafs_pop_top(n)
+        return [self.get_path(id) for id in selected_leaf_ids]
+
+
 class TreeOfThoughts:
     initial: PromptSandwich
     reasoning: ReasoningPrompt
@@ -60,191 +130,106 @@ class TreeOfThoughts:
 
         # self.params = {criteria: (1, 0) for criteria in self.graded_criteria} # TODO: use these in self.process_rating
 
-        self.tree = {}
-        self.root = ""
-        self.answers = []
-        self.leafs_that_are = {
-            "active": set(),
-            "viable": set(),
-            "dead": set(),
-        }
+        self.tree = Tree()
 
         # TODO: memory, error propagation
 
-        self.viable_leafs = {}
-
         self.verbose_buffer = ""
 
-    def reason(self, argument, verbose=False, print_tree=False):
-        return asyncio.run(self._reason(argument, verbose, print_tree))
+    def reason(self, argument, verbose=False):
+        return asyncio.run(self._reason(argument, verbose))
 
     def print_verbose(self):
         # clear screen
         print("\033c", end="")
         print(self.verbose_buffer)
 
-    def print_tree(self, parent=None, level=0, visited=None):
-        if visited is None:
-            visited = set()
+    async def _reason(self, argument, verbose):
+        self.verbose_buffer = ""
 
-        if parent is None:
-            for parent in (k for k in self.tree if not any(k in v for v in self.tree.values())):
-                self.print_tree(parent, level, visited)
-        else:
-            print('  ' * level, parent)
-            visited.add(parent)
-            for child in self.tree.get(parent, []):
-                if child not in visited:
-                    self.print_tree(child, level + 1, visited)
-
-    async def _reason(self, argument, verbose, print_tree):
-        root = self.initial.prefix + argument + self.initial.suffix
-        self.root = root
+        root_value = self.initial.prefix + argument + self.initial.suffix
+        root = self.tree.add_root(root_value)
 
         if verbose:
             self.verbose_buffer += color['cyan']( "ROOT ------------------------------------------------------\n")
-            self.verbose_buffer += root + "\n\n"
+            self.verbose_buffer += root_value + "\n\n"
             self.print_verbose()
 
-        self.tree = {self.root: []}
-        self.root = root
-        self.leafs_that_are["active"] = set()
-        self.leafs_that_are["dead"] = set()
-        self.viable_leafs = {self.root: 1e-3}
-
         current = 1
-        answers = []
 
-        # TODO: export loop contents to self.step()
         while current <= self.max_iterations:
-            self.viable_leafs = {k: v * self.decay for k, v in self.viable_leafs.items()}
 
             if verbose:
-                self.verbose_buffer += color['green'](f"ITERATION {current} VIABLE LEAF THOUGHTS\n")
-                if not self.viable_leafs:
-                    self.verbose_buffer += "    (No surviving leafs)\n\n"
-                for thought in self.viable_leafs.keys():
-                    self.verbose_buffer += f"    {thought}\n"
-                self.verbose_buffer += "\n"
-                self.print_verbose()
-
-            # Determine if any leafs are ready to be answered
-            if verbose:
+                self.verbose_buffer += color['green'](f"ITERATION {current}\n")
                 self.verbose_buffer += color['cyan']( "CHECKING FOR ANSWERABLE THOUGHTS --------------------------\n")
                 self.print_verbose()
 
-            selected_leaf_thoughts = []
-            reasoning_paths = []
-            can_answer = []
+            self.tree.decay()
 
-            self.viable_leafs
-            self.leafs_that_are["active"] = sorted(self.viable_leafs, key=self.viable_leafs.get, reverse=True)[:self.n_active]
+            # get (node, path_string) pairs, and default to the root if all leafs die
+            selected_leafs = self.tree.paths_pop_top(self.n_active)
 
-            # TODO: iterate over viable_leafs instead
-            for leaf_thought, reasoning_path in self.traverse(self.root):
-                if leaf_thought not in self.leafs_that_are["active"]:
-                    continue
-
-                selected_leaf_thoughts.append(leaf_thought)
-                reasoning_paths.append(reasoning_path)
-                can_answer.append(self.is_finished(reasoning_path + "\n" + leaf_thought))
-
-            if not selected_leaf_thoughts:
-                selected_leaf_thoughts.append(self.root)
-                reasoning_paths.append("")
-                can_answer.append(self.is_finished(self.root))
-
-
-            can_answer = await asyncio.gather(*can_answer)
-            can_answer = [x[0] for x in can_answer]
+            if selected_leafs:
+                can_answer = await asyncio.gather(*[self.is_finished(path + "\n" + thought.value) for thought, path, attrs in selected_leafs])
+                can_answer = [x[0] for x in can_answer]
+                for i, is_answerable in enumerate(can_answer):
+                    selected_leafs[i][2]["preceeds_answer"] = is_answerable
+            else:
+                selected_leafs = [(root, "", {"preceeds_answer": False})]
 
             if verbose:
-                # self.verbose_buffer +=  color['red']("active nodes:\n    * " ) + color['red']("\n    *").join(self.leafs_that_are["active"]) + "\n\n"
-                # self.verbose_buffer += "\n    -> " + color['red']("\n    -> ").join([color['red'](str(a)) for a in can_answer]) + "\n\n"
-                self.verbose_buffer += f"  {sum(can_answer)} answerable thoughts found\n\n"
-                self.print_verbose()
-
-            # Generate next thoughts and/or answers
-            if verbose:
+                tally = sum(1 for _, _, meta in selected_leafs if meta.get('preceeds_answer', False))
+                self.verbose_buffer += f"  {tally} selected leafs are potential answers\n\n"
                 self.verbose_buffer += color['cyan']( "GENERATING NEXT THOUGHTS ----------------------------------\n")
                 self.print_verbose()
 
-            next_thoughts_list = []
-            answer_leafs = []
-            n_thoughts = 0
-            n_answers = 0
             if verbose:
-                # self.verbose_buffer += color['cyan']("\n***\n").join([reasoning_path + "\n" + color['blue'](leaf_thought) + "\n\nReady to answer: " + str(can_answer) + "\n"for leaf_thought, reasoning_path, can_answer in zip(leaf_thoughts, reasoning_paths, can_answer)])
-                self.verbose_buffer += color['cyan']("\n------------------------------\n").join([reasoning_path + "\n" + color['blue'](leaf_thought) + "\n" for leaf_thought, reasoning_path in zip(selected_leaf_thoughts, reasoning_paths)]) + "\n"
+                self.verbose_buffer += color['cyan']("\n------------------------------\n").join([reasoning_path + "\n" + color['blue'](leaf_node.value) + "\n" for leaf_node, reasoning_path, attrs in selected_leafs]) + "\n"
                 self.print_verbose()
 
-            for leaf_thought, reasoning_path, can_answer in zip(selected_leaf_thoughts, reasoning_paths, can_answer):
-                if can_answer:
-                    next_thoughts_list.append(self.final_result(reasoning_path + "\n" + leaf_thought))
-                    answer_leafs.append(leaf_thought)
-                    n_answers += 1
-                    n_thoughts += 1
+            next_thoughts_list = []
+            for leaf_thought, reasoning_path, attrs in selected_leafs:
+                if attrs["preceeds_answer"]:
+                    next_thoughts_list.append(self.final_result(reasoning_path + "\n" + leaf_thought.value))
                 else:
-                    next_thoughts_list.append(self.get_next_thoughts(self.n_child_thoughts, reasoning_path + "\n" + leaf_thought))
-                    n_thoughts += self.n_child_thoughts
+                    next_thoughts_list.append(self.get_next_thoughts(self.n_child_thoughts, reasoning_path + "\n" + leaf_thought.value))
 
             next_thoughts_list = await asyncio.gather(*next_thoughts_list)
             next_thoughts_list = [x if isinstance(x[0], str) else [y[0] for y in x] for x in next_thoughts_list]
 
             if verbose:
-                self.verbose_buffer += f"  {n_thoughts} new thoughts from here\n" 
-                self.verbose_buffer += f"  {n_answers} of which are potential answers\n\n"
-                self.print_verbose()
-
-            # Prune leafs with bad reasoning, save good ones to the tree
-            if verbose:
+                tally = sum(len(x) for x in next_thoughts_list)
+                self.verbose_buffer += f"  {tally} new thoughts from here\n" 
                 self.verbose_buffer += color['cyan']( "ASSESSING THOUGHT PATHS -----------------------------------\n")
                 self.print_verbose()
 
-            thought_ratings_list = []
-            for leaf_thought, reasoning_path, next_thoughts in zip(selected_leaf_thoughts, reasoning_paths, next_thoughts_list):
-                if leaf_thought not in answer_leafs:
-                    thought_ratings_list.append(asyncio.gather(*[self.evaluate_reasoning(reasoning_path + "\n" + leaf_thought + "\n" + next_thought) for next_thought in next_thoughts]))
+            thought_scores_list = []
+            for leaf_thought, next_thoughts in zip(selected_leafs, next_thoughts_list):
+                leaf, reasoning_path, attrs = leaf_thought
+                if attrs["preceeds_answer"]:
+                    thought_scores_list.append(*[self.validate_result(next_thoughts[0])]) # attempted answers only have one branch
                 else:
-                    thought_ratings_list.append(*[self.validate_result(next_thoughts[0])]) # attempted answers only have one branch
+                    thought_scores_list.append(asyncio.gather(*[self.evaluate_reasoning(reasoning_path + "\n" + leaf.value + "\n" + next_thought) for next_thought in next_thoughts]))
 
-            thought_ratings_list = await asyncio.gather(*thought_ratings_list)
-            thought_ratings_list = [x if isinstance(x, list) else [x] for x in thought_ratings_list]
+            thought_scores_list = await asyncio.gather(*thought_scores_list)
+            thought_scores_list = [x if isinstance(x, list) else [x] for x in thought_scores_list]
 
             if verbose:
-                self.verbose_buffer += "  new thought scores: "
-                n_true = 0
-                for thought_ratings in thought_ratings_list:
-                    for next_thought_rating in thought_ratings:
-                        self.verbose_buffer += str(next_thought_rating) + ", "
-                        if next_thought_rating > 0:
-                            n_true += 1
-                self.verbose_buffer += "\n"
+                n_thoughts = sum(len(x) for x in thought_scores_list)
+                n_true = sum([1 for x in thought_scores_list for num in x if num > 0])
                 self.verbose_buffer += f"  {n_true}/{n_thoughts} of the new thoughts are viable\n"
                 self.print_verbose()
 
-            for leaf_thought, next_thoughts, thought_ratings in zip(selected_leaf_thoughts, next_thoughts_list, thought_ratings_list):
-                '''
-                Every node in the tree has either been given a viability score, or marked as a deadend.
-                A leaf thought is always initilaized as a list, which points to all of its next_thoughts.
-                Its next thoughts are either added to answer leafs, or its score is saved in viable_leafs, or goes into leafss that are dead.
-                '''
-                if not leaf_thought in self.tree:
-                    self.tree[leaf_thought] = []
+            answers = []
+            for leaf_thought, next_thoughts, next_thought_ratings in zip(selected_leafs, next_thoughts_list, thought_scores_list):
+                leaf, reasoning_path, attrs = leaf_thought
+                for next_thought, rating in zip(next_thoughts, next_thought_ratings):
+                    self.tree.add(next_thought, score=rating, parent=leaf)
 
-                for next_thought, next_thought_rating in zip(next_thoughts, thought_ratings):
-                    self.tree[leaf_thought].append(next_thought)
-                    if next_thought_rating > 0: # thought survival threshold
-                        if leaf_thought in answer_leafs: # answer survived validation
-                            answers.append(next_thought)
-                          # and next_thought not in self.leafs_that_are["dead"]
-                        if next_thought not in self.viable_leafs:
-                            self.viable_leafs[next_thought] = next_thought_rating # leaf survived evaluation
-                    else:
-                        self.leafs_that_are["dead"].add(next_thought)
-
-                    if leaf_thought in self.viable_leafs:
-                        del self.viable_leafs[leaf_thought]
+            # for leaf_thought, next_thought_ratings in zip(selected_leafs, thought_scores_list):
+                if leaf_thought[2]["preceeds_answer"] and next_thought_ratings[0] > 0:
+                    answers.append(next_thoughts[0])
+                    self.tree.mark_as_answer(leaf.id, root.id)
 
             if verbose:
                 self.verbose_buffer += f"  {len(answers)} answers passing validation\n\n"
@@ -253,40 +238,13 @@ class TreeOfThoughts:
             current += 1
 
             if answers:
-                if print_tree:
-                    self.print_tree()
                 return answers
 
         if verbose:
-            self.verbose_buffer += color['cyan']( "NO ANSWERS FOUND ------------------------------------------\n\n")
+            self.verbose_buffer += color['cyan']( "NO ANSWERS FOUND IN MAX STEPS -----------------------------\n\n")
             self.print_verbose()
-            if print_tree:
-                self.print_tree()
 
-    # TODO: build from leafs not root
-    def traverse(self, node, path=None):
-        '''
-        returns all of the paths from the root to the leaves of the tree
-        as a list of (thought, reasoning) tuples
-        '''
-        if not path:
-            path = []
-
-        if node not in self.tree: # is a leaf
-            if node in self.leafs_that_are["dead"]:
-                return []
-            return [(node, "\n".join(path))]
-        else:
-
-            path.append(node)
-            child_paths = []
-            for child in self.tree[node]:
-                child_paths += self.traverse(child, path[:])
-
-            if node == self.root and not child_paths:
-                return [(self.root, "")]
-
-            return child_paths
+        return []
 
     @lmql.query
     async def final_result(self, reasoning):
@@ -305,17 +263,17 @@ class TreeOfThoughts:
 
     async def validate_result(self, result):
         if self.answer.validation.items:
-            validation_failures = []
+            answer_validations = []
             for validation in self.answer.validation.items:
                 if isinstance(validation, tuple):
-                    validation_failures.append(self.prompt_validate(result, validation[0], validation[1]))
+                    answer_validations.append(self.prompt_validate(result, validation[0], validation[1]))
                 else:
-                    validation_failures.append(validation(result))
+                    answer_validations.append(validation(result))
 
-            validation_failures = await asyncio.gather(*validation_failures)
-            validation_failures = [x[0] if isinstance(x, list) else x for x in validation_failures]
+            answer_validations = await asyncio.gather(*answer_validations)
+            answer_validations = [x[0] if isinstance(x, list) else x for x in answer_validations]
 
-            if any(validation_failures):
+            if not all(answer_validations):
                 return 0 # below survival threshold
 
         return 1 # above survival threshold
@@ -326,12 +284,16 @@ class TreeOfThoughts:
         argmax
             "( yes/no )\n"
             "{self.answer.validation.prefix}"
-            "{validation}"
+            "{result}"
             "{self.answer.validation.suffix}"
+            "{validation}"
             "[yn]"
             if yn.split()[-1]  in ["yes", "Yes"]:
-                return not should_be
-            return should_be
+                answer = True
+            else:
+                answer = False
+
+            return answer == should_be
         from
             "openai/gpt-3.5-turbo"
         where
@@ -350,7 +312,7 @@ class TreeOfThoughts:
     @lmql.query
     async def get_next_thought(self, reasoning):
         '''lmql
-        sample(cache=False)
+        sample()
             "{reasoning}\n"
             "[thought]"
             return thought
@@ -372,8 +334,7 @@ class TreeOfThoughts:
             "[yn]"
             if yn.split()[-1] in ["yes", "Yes"]:
                 return True
-            else:
-                return False
+            return False
         from 
             "openai/gpt-3.5-turbo"
         where
@@ -387,23 +348,21 @@ class TreeOfThoughts:
     # TODO: programatic constraints
     # TODO: explore metaprompting for rating criteria
     async def evaluate_reasoning(self, reasoning):
-        fatal_flags = [self.bool_classify(self.reasoning.fatal.prefix, self.reasoning.fatal.suffix, statement, reasoning, should_be=False) for statement in self.reasoning.fatal.items]
-        fatal_flags += [self.bool_classify(self.reasoning.vital.prefix, self.reasoning.vital.suffix, statement, reasoning, should_be=True) for statement in self.reasoning.vital.items]
-        fatal_flags = await asyncio.gather(*fatal_flags)
-        fatal_flags = [x[0] for x in fatal_flags]
-        if any(fatal_flags):
-            self.verbose_buffer += str(fatal_flags) + "\n"
+        thought_validations = [self.validate_thought(self.reasoning.fatal.prefix, self.reasoning.fatal.suffix, statement, reasoning, should_be=False) for statement in self.reasoning.fatal.items]
+        thought_validations += [self.validate_thought(self.reasoning.vital.prefix, self.reasoning.vital.suffix, statement, reasoning, should_be=True) for statement in self.reasoning.vital.items]
+        thought_validations = await asyncio.gather(*thought_validations)
+        thought_validations = [x[0] for x in thought_validations]
+        if not all(thought_validations):
+            self.verbose_buffer += str(thought_validations) + "\n"
             return 0
 
         evaluations = [self.grade(statement, reasoning) for statement in self.reasoning.graded.items]
         evaluations = await asyncio.gather(*evaluations)
         evaluations = [x[0] for x in evaluations]
-        # self.verbose_buffer += "  " + str(evaluations)
-        # self.verbose_buffer += f"  scored {sum(evaluations)}\n"
         return sum(evaluations)
 
     @lmql.query
-    async def bool_classify(self, prefix, suffix, statement, reasoning, should_be=True):
+    async def validate_thought(self, prefix, suffix, statement, reasoning, should_be=True):
         '''lmql
         argmax
             default = "yes" if should_be else "no"
@@ -413,8 +372,11 @@ class TreeOfThoughts:
             "{suffix}"
             "{statement}: [yn]"
             if yn.split()[-1] in ["yes", "Yes"]:
-                return not should_be
-            return should_be
+                answer = True
+            else:
+                answer = False
+
+            return answer == should_be
         from
             "openai/gpt-3.5-turbo"
         where

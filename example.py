@@ -39,16 +39,15 @@ tree_config = {
     },
     "answer": {
         "callback_prompt": {
-            "prefix": "Rewriting the expression `",
-            "suffix": "` using spaces between numbers and operators and obeying PEDMAS, the final expression is written as: ",
+            "suffix": "In conclusion, using (+,-,x,/) and obey PEDMAS, in one expression it is written as: ",
         },
         "callback_fn": lambda x: x.strip(),
         "validation" : {
-            "prefix": "I have a question about the expression `",
+            "prefix": "Please answer the following questions about the expression `",
             "suffix": "`. ",
             "items": [
-                ("Does the expression utilize 4 operands?", True),
-                ("Does the expression evaluate to 24?",  True) # TODO: see if {argument} works
+                ("Are four numbers used to obtain 24?", True),
+                ("Does the expression really equal 24?",  True) # TODO: see if {argument} works
             ]
         },
     },
@@ -56,7 +55,7 @@ tree_config = {
 
 number_maker = TreeOfThoughts(**tree_config)
 
-answers = number_maker.reason("24", verbose=True, print_tree=True)
+answers = number_maker.reason("24", verbose=True)
 
 print()
 print("FINAL ANSWERS")
