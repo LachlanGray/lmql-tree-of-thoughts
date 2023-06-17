@@ -113,13 +113,13 @@ class TreeOfThoughts:
     reasoning: ReasoningPrompt
     answer: AnswerPrompt
 
-    def __init__(self, initial, reasoning, answer):
+    def __init__(self, initial, reasoning, answer, max_iterations=10):
 
         self.initial = create_prompt_sandwich(initial)
         self.reasoning = create_prompt_reasoning(reasoning)
         self.answer = create_prompt_answer(answer)
 
-        self.max_iterations = 10
+        self.max_iterations = max_iterations
 
         self.penalties = [] # TODO: investigate if these are useful, would add into evaluations
         self.bonuses = []
@@ -260,12 +260,14 @@ class TreeOfThoughts:
 
     async def validate_result(self, result):
         if self.answer.validation.items:
+            loop = asyncio.get_event_loop()
             answer_validations = []
             for validation in self.answer.validation.items:
                 if isinstance(validation, tuple):
                     answer_validations.append(self.prompt_validate(result, validation[0], validation[1]))
                 else:
-                    answer_validations.append(validation(result))
+                    answer_validations.append(loop.run_in_executor(None, validation, result))
+                    # answer_validations.append(validation(result))
 
             answer_validations = await asyncio.gather(*answer_validations)
             answer_validations = [x[0] if isinstance(x, list) else x for x in answer_validations]

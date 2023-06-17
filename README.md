@@ -1,6 +1,8 @@
 # Tree of thoughts
 A LMQL implementation of something like tree of thoughts. Applies a natural selection process to steer reasoning and constrain the results.
 
+Many many improvements to be made.
+
 ## Features
 I meant this to be as "engineerable" as possible. Each tree instance is configured to solve a specific problem, and be used as a function. It can apply a callback function to the result so it doesn't necessarily have to return text.
 
@@ -22,5 +24,5 @@ Each iteration consists of a review phase, a generation phase, an evaluation pha
 - **Evaluation:** New thoughts are scored against defined criteria to determine the relative strength of the threads. If any conclusions were generated, they are validated and returned if they pass. 
 
 ## Usage
-For now see `example.py` to get a sense of it. In a nutshell there's three configurations: one for the initial prompt, one that governs the reasoning dynamics (evaluation, answer recognition), and one that describes how answer attempts are handled (conclusion generation, callbacks, validation).
+For now see the `examples` folder to get a sense of it. In a nutshell there's three configurations: one for the initial prompt, one that governs the reasoning dynamics (evaluation, answer recognition), and one that describes how answer attempts are handled (conclusion generation, callbacks, validation).
 
