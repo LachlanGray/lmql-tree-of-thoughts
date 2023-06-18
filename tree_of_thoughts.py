@@ -47,12 +47,13 @@ class Node:
 class Tree:
     def __init__(self):
         self.nodes = {}
-        self.viable_leaf_ids = {}
+        self.stack = {}
         self.answers = []
         self.id_counter = 0
-        self.decay_factor = 0.99
 
-    def add(self, value: str, score: int | float, parent: Node):
+    def push(self, value: str, score: int | float, parent: Node):
+        # nodes have unique names, still determined by counter
+        # viable_leaf_ids is instead "data" and has keys for each of the nodes
         self.id_counter += 1
 
         if parent.id not in self.nodes:
@@ -60,8 +61,7 @@ class Tree:
 
         self.nodes[self.id_counter] = Node(self.id_counter, value, parent.id)
 
-        if score > 0:
-            self.viable_leaf_ids[self.id_counter] = score
+        self.stack[self.id_counter] = score
 
     def add_root(self, value: str) -> Node:
         self.id_counter += 1
@@ -73,13 +73,19 @@ class Tree:
     def mark_as_answer(self, id: int, root_id: int):
         self.answers.append((id, root_id))
 
-    def decay(self):
-        self.viable_leaf_ids = {k: v * self.decay_factor for k, v in self.viable_leaf_ids.items()}
-
     def leaves_pop_top(self, n: int) -> list[int]:
-        selected_leaf_ids = sorted(self.viable_leaf_ids, key=self.viable_leaf_ids.get, reverse=True)[:n]
+        # selected_leaf_ids = sorted(self.viable_leaf_ids, key=self.viable_leaf_ids.get, reverse=True)[:n]
+        # selected_leaf_ids = sorted(self.viable_leaf_ids, reverse=True)[:n]
+        selected_leaf_ids = []
+        i = self.id_counter
+        while len(selected_leaf_ids) < n and i > 0:
+            if i in self.stack:
+                selected_leaf_ids.append(i)
+            i -= 1
+
         for leaf_id in selected_leaf_ids:
-            del self.viable_leaf_ids[leaf_id]
+            if self.nodes[leaf_id].parent_id:
+                del self.stack[leaf_id]
 
         return selected_leaf_ids
 
@@ -106,7 +112,6 @@ class Tree:
     def paths_pop_top(self, n) -> list[tuple[Node, str, dict]]:
         selected_leaf_ids = self.leaves_pop_top(n)
         return [self.get_path(id) for id in selected_leaf_ids]
-
 
 class TreeOfThoughts:
     initial: PromptSandwich
@@ -160,8 +165,6 @@ class TreeOfThoughts:
                 self.verbose_buffer += color['green'](f"ITERATION {current}\n")
                 self.verbose_buffer += color['cyan']( "CHECKING FOR ANSWERABLE THOUGHTS --------------------------\n")
                 self.print_verbose()
-
-            self.tree.decay()
 
             # get (node, path_string) pairs, and default to the root if all leaves die
             selected_leaves = self.tree.paths_pop_top(n_active_leaves)
@@ -220,8 +223,9 @@ class TreeOfThoughts:
             answers = []
             for leaf_thought, next_thoughts, next_thought_ratings in zip(selected_leaves, next_thoughts_list, thought_scores_list):
                 leaf, reasoning_path, attrs = leaf_thought
-                for next_thought, rating in zip(next_thoughts, next_thought_ratings):
-                    self.tree.add(next_thought, score=rating, parent=leaf)
+                for next_thought, rating in sorted(zip(next_thoughts, next_thought_ratings), key=lambda x: x[1], reverse=True):
+                    if rating > 0:
+                        self.tree.push(next_thought, score=rating, parent=leaf)
 
             # for leaf_thought, next_thought_ratings in zip(selected_leaves, thought_scores_list):
                 if leaf_thought[2]["preceeds_answer"] and next_thought_ratings[0] > 0:
